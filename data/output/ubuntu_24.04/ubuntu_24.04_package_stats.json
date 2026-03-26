@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-03-26T20:07:58.311428",
+  "ubuntu_version": "24.04 (Noble Numbat)",
+  "main": {
+    "count": 6099,
+    "type": "Canonical maintained"
+  },
+  "universe": {
+    "count": 64754,
+    "type": "Community maintained (ESM scope)"
+  },
+  "total": 70853
+}
