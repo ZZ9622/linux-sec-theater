@@ -16,7 +16,7 @@ from io import BytesIO
 # Target repository: openSUSE Leap 16.0 OSS (corresponds to commercial SLES 16 core)
 # Source packages repository
 SRC_REPO_URL = "https://download.opensuse.org/source/distribution/leap/16.1/repo/oss/repodata/"
-OUTPUT_FILE = "../data/output/suse/sles_16_src_pkgs.csv"
+OUTPUT_FILE = "./data/output/suse/sles_16_src_pkgs.csv"
 
 def get_suse_src_pkg_list(base_url):
     print(f"Processing repository: {base_url}")

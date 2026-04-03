@@ -15,7 +15,7 @@ from datetime import datetime
 # Configuration
 UBUNTU_MIRROR = "http://archive.ubuntu.com/ubuntu"
 UBUNTU_VERSION = "noble"
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "output", "ubuntu_24.04")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), ".", "data", "output", "ubuntu_24.04")
 
 # Create output directory if it doesn't exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
