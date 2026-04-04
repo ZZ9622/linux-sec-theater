@@ -126,3 +126,19 @@ for pkg in sampled_packages[:30]:
 print(f"\n高危样本最后10个包示例:")
 for pkg in sampled_packages[-10:]:
     print(f"  {pkg}")
+
+# 额外筛选：提取所有 Golang 相关库
+def is_golang_library(pkg_name):
+    name_lower = pkg_name.lower()
+    # 严格规则：仅保留 golang- 前缀包。
+    # 如需包含 Go 运行时相关库，可把 libgo 前缀放开。
+    return name_lower.startswith('golang-')
+
+golang_packages = sorted([pkg for pkg in target_packages if is_golang_library(pkg)])
+target_golang_file = os.path.join(output_dir, "target_golang.txt")
+with open(target_golang_file, 'w') as f:
+    for pkg in golang_packages:
+        f.write(pkg + '\n')
+
+print(f"\nGolang 库包数量: {len(golang_packages)}")
+print(f"Golang 包列表已输出到: {target_golang_file}")
