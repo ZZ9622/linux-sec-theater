@@ -3,7 +3,6 @@
 
 import csv
 import os
-import random
 
 # 文件路径
 ubuntu_file = "/Volumes/T7/linux-sec-theater/data/output/ubuntu_24.04/ubuntu_24.04_universe_packages.txt"
@@ -71,37 +70,6 @@ def matches_criteria(pkg_name):
 target_packages = sorted([pkg for pkg in filtered if matches_criteria(pkg)])
 print(f"筛选后包数: {len(target_packages)}")
 
-# 进一步筛选高危包 (High-Risk Targeting)
-def is_high_risk(pkg_name):
-    name_lower = pkg_name.lower()
-    
-    # 聚焦高危区域
-    high_risk_patterns = [
-        # 1. 各种动态链接库
-        'lib',
-        # 2. 多媒体处理（漏洞重灾区）
-        'image', 'media', 'audio', 'video',
-        # 3. 网络工具
-        'net', 'web', 'proxy'
-    ]
-    
-    for pattern in high_risk_patterns:
-        if pattern in name_lower:
-            return True
-    
-    return False
-
-high_risk_packages = [pkg for pkg in target_packages if is_high_risk(pkg)]
-print(f"高危包数: {len(high_risk_packages)}")
-
-# 随机抽取 500 个高危包
-random.seed(27)  # 设置随机种子以确保可重现性
-sample_size = min(500, len(high_risk_packages))
-sampled_packages = random.sample(high_risk_packages, sample_size)
-sampled_packages.sort()  # 排序以保持一致性
-
-print(f"随机抽样: {len(sampled_packages)} 个包")
-
 # 创建输出目录
 os.makedirs(output_dir, exist_ok=True)
 
@@ -110,22 +78,7 @@ output_file = os.path.join(output_dir, "target_packages.txt")
 with open(output_file, 'w') as f:
     for pkg in target_packages:
         f.write(pkg + '\n')
-
-# 输出高危包随机样本
-output_sample_file = os.path.join(output_dir, "target500_01.txt")
-with open(output_sample_file, 'w') as f:
-    for pkg in sampled_packages:
-        f.write(pkg + '\n')
-
 print(f"\n完整结果已输出到: {output_file}")
-print(f"高危样本已输出到: {output_sample_file}")
-print(f"\n高危样本前30个包示例:")
-for pkg in sampled_packages[:30]:
-    print(f"  {pkg}")
-
-print(f"\n高危样本最后10个包示例:")
-for pkg in sampled_packages[-10:]:
-    print(f"  {pkg}")
 
 # 额外筛选：提取所有 Golang 相关库
 def is_golang_library(pkg_name):
@@ -142,3 +95,16 @@ with open(target_golang_file, 'w') as f:
 
 print(f"\nGolang 库包数量: {len(golang_packages)}")
 print(f"Golang 包列表已输出到: {target_golang_file}")
+
+# 额外筛选：提取所有 librust 前缀包
+def is_librust_library(pkg_name):
+    return pkg_name.lower().startswith('librust')
+
+ligrust_packages = sorted([pkg for pkg in target_packages if is_librust_library(pkg)])
+target_ligrust_file = os.path.join(output_dir, "target_ligrust.txt")
+with open(target_ligrust_file, 'w') as f:
+    for pkg in ligrust_packages:
+        f.write(pkg + '\n')
+
+print(f"\nlibrust 前缀包数量: {len(ligrust_packages)}")
+print(f"librust 包列表已输出到: {target_ligrust_file}")
