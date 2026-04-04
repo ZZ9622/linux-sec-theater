@@ -1,0 +1,466 @@
+{
+    "golang-cfssl": {
+        "ubuntu_full_version": "1.2.0+git20160825.89.7fb22c8-3.1build1",
+        "upstream_version": "1.6.5"
+    },
+    "golang-github-abbot-go-http-auth-dev": {
+        "ubuntu_full_version": "0.4.0-6",
+        "upstream_version": "0.4.0"
+    },
+    "golang-github-aelsabbahy-gonetstat-dev": {
+        "ubuntu_full_version": "0.0~git20160428.0.edf89f7-4",
+        "upstream_version": "0.0~git20160428.0.edf89f7"
+    },
+    "golang-github-bep-gowebp-dev": {
+        "ubuntu_full_version": "0.3.0+dfsg-1",
+        "upstream_version": "0.4.0+dfsg"
+    },
+    "golang-github-bgentry-go-netrc-dev": {
+        "ubuntu_full_version": "0.0~git20140422.9fd32a8-1",
+        "upstream_version": "0.0~git20140422.9fd32a8"
+    },
+    "golang-github-cloudflare-cfssl-dev": {
+        "ubuntu_full_version": "1.2.0+git20160825.89.7fb22c8-3.1build1",
+        "upstream_version": "1.6.5"
+    },
+    "golang-github-containernetworking-plugin-dnsname": {
+        "ubuntu_full_version": "1.3.1+ds1-2build1",
+        "upstream_version": "1.3.1+ds1"
+    },
+    "golang-github-containernetworking-plugins-dev": {
+        "ubuntu_full_version": "1.1.1+ds1-3build1",
+        "upstream_version": "1.1.1+ds1"
+    },
+    "golang-github-containers-image": {
+        "ubuntu_full_version": "5.29.2-2",
+        "upstream_version": "5.39.1"
+    },
+    "golang-github-containers-image-dev": {
+        "ubuntu_full_version": "5.29.2-2",
+        "upstream_version": "5.39.1"
+    },
+    "golang-github-crewjam-httperr-dev": {
+        "ubuntu_full_version": "0.2.0-3",
+        "upstream_version": "0.2.0"
+    },
+    "golang-github-cristalhq-hedgedhttp-dev": {
+        "ubuntu_full_version": "0.9.1-1",
+        "upstream_version": "0.9.1"
+    },
+    "golang-github-dnstap-golang-dnstap-cli": {
+        "ubuntu_full_version": "0.4.0-5",
+        "upstream_version": "0.4.0"
+    },
+    "golang-github-dnstap-golang-dnstap-dev": {
+        "ubuntu_full_version": "0.4.0-5",
+        "upstream_version": "0.4.0"
+    },
+    "golang-github-dsnet-golib-dev": {
+        "ubuntu_full_version": "0.0~git20171103.1ea1667-1.1",
+        "upstream_version": "0.0~git20171103.1ea1667"
+    },
+    "golang-github-emersion-go-smtp-dev": {
+        "ubuntu_full_version": "0.12.1-1",
+        "upstream_version": "0.24.0"
+    },
+    "golang-github-ensighten-udnssdk-dev": {
+        "ubuntu_full_version": "1.3.4-2",
+        "upstream_version": "1.3.4"
+    },
+    "golang-github-evilsocket-ftrace-dev": {
+        "ubuntu_full_version": "1.2.0-2.1",
+        "upstream_version": "1.2.0"
+    },
+    "golang-github-evilsocket-islazy-dev": {
+        "ubuntu_full_version": "1.11.0-1",
+        "upstream_version": "1.11.0"
+    },
+    "golang-github-evilsocket-recording-dev": {
+        "ubuntu_full_version": "0.0~git20190408.3ce1dcf-2",
+        "upstream_version": "0.0~git20190408.3ce1dcf"
+    },
+    "golang-github-facebookgo-httpdown-dev": {
+        "ubuntu_full_version": "0.0~git20160323.0.a3b1354-8",
+        "upstream_version": "0.0~git20160323.0.a3b1354"
+    },
+    "golang-github-felixge-httpsnoop-dev": {
+        "ubuntu_full_version": "1.0.3-3",
+        "upstream_version": "1.0.3"
+    },
+    "golang-github-fernet-fernet-go-dev": {
+        "ubuntu_full_version": "0.0~git20180830.9eac43b-2build3",
+        "upstream_version": "0.0~git20180830.9eac43b"
+    },
+    "golang-github-fhs-go-netrc-dev": {
+        "ubuntu_full_version": "1.0.0-3",
+        "upstream_version": "1.0.0"
+    },
+    "golang-github-git-lfs-go-netrc-dev": {
+        "ubuntu_full_version": "0.0~git20210914.f0c862d-1",
+        "upstream_version": "0.0~git20210914.f0c862d"
+    },
+    "golang-github-gliderlabs-ssh-dev": {
+        "ubuntu_full_version": "0.3.3-1",
+        "upstream_version": "0.3.3"
+    },
+    "golang-github-go-fed-httpsig-dev": {
+        "ubuntu_full_version": "1.1.0-2",
+        "upstream_version": "1.1.0"
+    },
+    "golang-github-gobwas-httphead-dev": {
+        "ubuntu_full_version": "0.1.0-3",
+        "upstream_version": "0.1.0"
+    },
+    "golang-github-goji-httpauth-dev": {
+        "ubuntu_full_version": "0.0~git20160601.2da839a-3",
+        "upstream_version": "0.0~git20160601.2da839a"
+    },
+    "golang-github-golang-freetype-dev": {
+        "ubuntu_full_version": "0.0~git20170609.e2365df+dfsg-2",
+        "upstream_version": "0.0~git20170609.e2365df+dfsg"
+    },
+    "golang-github-gorilla-websocket-dev": {
+        "ubuntu_full_version": "1.5.1-1",
+        "upstream_version": "1.5.3"
+    },
+    "golang-github-gregjones-httpcache-dev": {
+        "ubuntu_full_version": "0.0~git20180305.9cad4c3-1.1",
+        "upstream_version": "0.0~git20180305.9cad4c3"
+    },
+    "golang-github-hashicorp-go-cleanhttp-dev": {
+        "ubuntu_full_version": "0.5.2-1",
+        "upstream_version": "0.5.2"
+    },
+    "golang-github-hashicorp-go-retryablehttp-dev": {
+        "ubuntu_full_version": "0.7.1-1",
+        "upstream_version": "0.7.1"
+    },
+    "golang-github-hashicorp-mdns-dev": {
+        "ubuntu_full_version": "1.0.3-2",
+        "upstream_version": "1.0.5"
+    },
+    "golang-github-hashicorp-net-rpc-msgpackrpc-dev": {
+        "ubuntu_full_version": "0.0~git20151116.0.a14192a-1.1",
+        "upstream_version": "0.0~git20151116.0.a14192a"
+    },
+    "golang-github-henvic-httpretty-dev": {
+        "ubuntu_full_version": "0.1.3-1",
+        "upstream_version": "0.1.3"
+    },
+    "golang-github-inetaf-tcpproxy-dev": {
+        "ubuntu_full_version": "0.0~git20231102.2862066-2",
+        "upstream_version": "0.0~git20231102.2862066"
+    },
+    "golang-github-jaksi-sshutils-dev": {
+        "ubuntu_full_version": "0.0.15-2",
+        "upstream_version": "0.0.15"
+    },
+    "golang-github-jarcoal-httpmock-dev": {
+        "ubuntu_full_version": "1.3.1-1",
+        "upstream_version": "1.4.1"
+    },
+    "golang-github-jbenet-go-context-dev": {
+        "ubuntu_full_version": "0.0~git20150711.d14ea06-4",
+        "upstream_version": "0.0~git20150711.d14ea06"
+    },
+    "golang-github-jcmturner-dnsutils.v2-dev": {
+        "ubuntu_full_version": "2.0.0-2",
+        "upstream_version": "2.0.0"
+    },
+    "golang-github-jedisct1-go-dnsstamps-dev": {
+        "ubuntu_full_version": "0.1.3-1",
+        "upstream_version": "0.1.5"
+    },
+    "golang-github-jfbus-httprs-dev": {
+        "ubuntu_full_version": "0.0~git20180614.7861a11-1.1",
+        "upstream_version": "0.0~git20180614.7861a11"
+    },
+    "golang-github-jimstudt-http-authentication-dev": {
+        "ubuntu_full_version": "0.0~git20140401.3eca13d-1.1",
+        "upstream_version": "0.0~git20140401.3eca13d"
+    },
+    "golang-github-jlaffaye-ftp-dev": {
+        "ubuntu_full_version": "0.2.0-1",
+        "upstream_version": "0.2.0"
+    },
+    "golang-github-jsimonetti-rtnetlink-dev": {
+        "ubuntu_full_version": "1.4.1-1",
+        "upstream_version": "2.2.0"
+    },
+    "golang-github-juju-httpprof-dev": {
+        "ubuntu_full_version": "0.0~git20141217.14bf14c-4",
+        "upstream_version": "0.0~git20141217.14bf14c"
+    },
+    "golang-github-juju-qthttptest-dev": {
+        "ubuntu_full_version": "0.1.3-1",
+        "upstream_version": "0.1.3"
+    },
+    "golang-github-julienschmidt-httprouter-dev": {
+        "ubuntu_full_version": "1.3.0-2",
+        "upstream_version": "1.3.0"
+    },
+    "golang-github-jung-kurt-gofpdf-dev": {
+        "ubuntu_full_version": "2.17.2+ds-3",
+        "upstream_version": "2.17.3+ds"
+    },
+    "golang-github-kevinburke-ssh-config-dev": {
+        "ubuntu_full_version": "1.2.0-1",
+        "upstream_version": "1.4.0"
+    },
+    "golang-github-knetic-govaluate-dev": {
+        "ubuntu_full_version": "3.0.0+git20171022.9aa4983-2",
+        "upstream_version": "3.0.0+git20171022.9aa4983"
+    },
+    "golang-github-koofr-go-httpclient-dev": {
+        "ubuntu_full_version": "0.0~git20200420.93aa7c7-1",
+        "upstream_version": "0.0~git20240520.e20f8f2"
+    },
+    "golang-github-kubernetes-gengo-dev": {
+        "ubuntu_full_version": "0.0~git20230829.9cce18d-2",
+        "upstream_version": "0.0~git20250207.1244d31"
+    },
+    "golang-github-libdns-libdns-dev": {
+        "ubuntu_full_version": "0.2.0-2",
+        "upstream_version": "1.1.1"
+    },
+    "golang-github-mattn-go-sqlite3-dev": {
+        "ubuntu_full_version": "1.14.19~ds1-1",
+        "upstream_version": "1.14.37~ds1"
+    },
+    "golang-github-mattn-go-unicodeclass-dev": {
+        "ubuntu_full_version": "0.0.2-1",
+        "upstream_version": "0.0.2"
+    },
+    "golang-github-mdlayher-ethernet-dev": {
+        "ubuntu_full_version": "0.0~git20220221.529eae5-1",
+        "upstream_version": "0.0~git20220221.529eae5"
+    },
+    "golang-github-mdlayher-genetlink-dev": {
+        "ubuntu_full_version": "1.3.1-1",
+        "upstream_version": "1.3.1"
+    },
+    "golang-github-mdlayher-netlink-dev": {
+        "ubuntu_full_version": "1.7.1-1",
+        "upstream_version": "1.8.0"
+    },
+    "golang-github-mdlayher-netx-dev": {
+        "ubuntu_full_version": "0.0~git20230430.7e21880-1",
+        "upstream_version": "0.0~git20230430.7e21880"
+    },
+    "golang-github-mdlayher-socket-dev": {
+        "ubuntu_full_version": "0.5.0-2",
+        "upstream_version": "0.5.1"
+    },
+    "golang-github-mendersoftware-openssl-dev": {
+        "ubuntu_full_version": "1.1.0-4",
+        "upstream_version": "1.1.0"
+    },
+    "golang-github-miekg-dns-dev": {
+        "ubuntu_full_version": "1.1.58-1",
+        "upstream_version": "1.1.72"
+    },
+    "golang-github-moul-http2curl-dev": {
+        "ubuntu_full_version": "0.0~git20161031.0.4e24498+dfsg-1.1",
+        "upstream_version": "2.3.0"
+    },
+    "golang-github-mozillazg-go-httpheader-dev": {
+        "ubuntu_full_version": "0.3.1-2",
+        "upstream_version": "0.3.1"
+    },
+    "golang-github-mozqnet-go-exploitdb-dev": {
+        "ubuntu_full_version": "0.0~git20181130.7c961e7-3",
+        "upstream_version": "0.0~git20181130.7c961e7"
+    },
+    "golang-github-mreiferson-go-httpclient-dev": {
+        "ubuntu_full_version": "0.0~git20160630.0.31f0106-2.1",
+        "upstream_version": "0.0~git20160630.0.31f0106"
+    },
+    "golang-github-muhlemmer-httpforwarded-dev": {
+        "ubuntu_full_version": "0.1.0-2",
+        "upstream_version": "0.1.0"
+    },
+    "golang-github-netflix-go-expect-dev": {
+        "ubuntu_full_version": "0.0~git20220104.73e0943-1",
+        "upstream_version": "0.0~git20220104.73e0943"
+    },
+    "golang-github-networkplumbing-go-nft-dev": {
+        "ubuntu_full_version": "0.2.0-2",
+        "upstream_version": "0.2.0"
+    },
+    "golang-github-opencontainers-image-spec-dev": {
+        "ubuntu_full_version": "1.1.0~rc5-1",
+        "upstream_version": "1.1.1"
+    },
+    "golang-github-openshift-imagebuilder-dev": {
+        "ubuntu_full_version": "1.2.5+ds1-3",
+        "upstream_version": "1.2.19+ds1"
+    },
+    "golang-github-pearkes-dnsimple-dev": {
+        "ubuntu_full_version": "0.0~git20161003.0adf7d0-3",
+        "upstream_version": "0.0~git20161003.0adf7d0"
+    },
+    "golang-github-pin-tftp-dev": {
+        "ubuntu_full_version": "3.1.0-1",
+        "upstream_version": "3.1.0"
+    },
+    "golang-github-pion-dtls.v2-dev": {
+        "ubuntu_full_version": "2.2.6-1",
+        "upstream_version": "2.2.6"
+    },
+    "golang-github-pion-mdns-dev": {
+        "ubuntu_full_version": "0.0.7-1",
+        "upstream_version": "0.0.7"
+    },
+    "golang-github-pion-rtcp-dev": {
+        "ubuntu_full_version": "1.2.10-1",
+        "upstream_version": "1.2.10"
+    },
+    "golang-github-pkg-sftp-dev": {
+        "ubuntu_full_version": "1.13.6-1",
+        "upstream_version": "1.13.9"
+    },
+    "golang-github-rclone-ftp-dev": {
+        "ubuntu_full_version": "1.0.0-220913-160-1",
+        "upstream_version": "1.0.0-220913-160"
+    },
+    "golang-github-ruudk-golang-pdf417-dev": {
+        "ubuntu_full_version": "0.0~git20181029.1af4ab5-2",
+        "upstream_version": "0.0~git20181029.1af4ab5"
+    },
+    "golang-github-rwcarlsen-goexif-dev": {
+        "ubuntu_full_version": "0.0~git20190401.9e8deec-2",
+        "upstream_version": "0.0~git20190401.9e8deec"
+    },
+    "golang-github-sherclockholmes-webpush-go-dev": {
+        "ubuntu_full_version": "1.2.0-2",
+        "upstream_version": "1.4.0"
+    },
+    "golang-github-shurcool-httpfs-dev": {
+        "ubuntu_full_version": "0.0~git20230704.f1e31cf-1",
+        "upstream_version": "0.0~git20230704.f1e31cf"
+    },
+    "golang-github-shurcool-httpgzip-dev": {
+        "ubuntu_full_version": "0.0~git20190516.1c7afaa-4",
+        "upstream_version": "0.0~git20190516.1c7afaa"
+    },
+    "golang-github-smira-go-ftp-protocol-dev": {
+        "ubuntu_full_version": "0.0~git20140829.066b75c-2",
+        "upstream_version": "0.0~git20140829.066b75c"
+    },
+    "golang-github-socketplane-libovsdb-dev": {
+        "ubuntu_full_version": "0.1+git20160503.9.d4b9e7a53548-2.1",
+        "upstream_version": "0.8.1"
+    },
+    "golang-github-soniah-dnsmadeeasy-dev": {
+        "ubuntu_full_version": "1.1+git20150117.5578a8c-5",
+        "upstream_version": "1.1+git20150117.5578a8c"
+    },
+    "golang-github-tent-http-link-go-dev": {
+        "ubuntu_full_version": "0.0~git20130702.0.ac974c6-6",
+        "upstream_version": "0.0~git20130702.0.ac974c6"
+    },
+    "golang-github-terra-farm-udnssdk-dev": {
+        "ubuntu_full_version": "1.3.5-1",
+        "upstream_version": "1.3.5"
+    },
+    "golang-github-tmc-grpc-websocket-proxy-dev": {
+        "ubuntu_full_version": "0.0~git20200427.3cfed13-3",
+        "upstream_version": "0.0~git20200427.3cfed13"
+    },
+    "golang-github-tv42-httpunix-dev": {
+        "ubuntu_full_version": "0.0~git20150427.b75d861-3",
+        "upstream_version": "0.0~git20150427.b75d861"
+    },
+    "golang-github-ugorji-go-codec": {
+        "ubuntu_full_version": "1.2.8-1build1",
+        "upstream_version": "1.2.8"
+    },
+    "golang-github-ugorji-go-codec-dev": {
+        "ubuntu_full_version": "1.2.8-1build1",
+        "upstream_version": "1.2.8"
+    },
+    "golang-github-valyala-fasthttp-dev": {
+        "ubuntu_full_version": "1:1.31.0-4",
+        "upstream_version": "1.67.0"
+    },
+    "golang-github-valyala-tcplisten-dev": {
+        "ubuntu_full_version": "0.0~git20210309.652d3b4-2",
+        "upstream_version": "1.0.0"
+    },
+    "golang-github-viki-org-dnscache-dev": {
+        "ubuntu_full_version": "0.0~git20130720.0.c70c1f2-1.1",
+        "upstream_version": "0.0~git20130720.0.c70c1f2"
+    },
+    "golang-github-vishvananda-netlink-dev": {
+        "ubuntu_full_version": "1.1.0.125.gf243826-4",
+        "upstream_version": "1.3.1"
+    },
+    "golang-github-vishvananda-netns-dev": {
+        "ubuntu_full_version": "0.0~git20211101.5004558-1",
+        "upstream_version": "0.0.5"
+    },
+    "golang-github-weppos-dnsimple-go-dev": {
+        "ubuntu_full_version": "0.0~git20160204.0.65c1ca7-2.1",
+        "upstream_version": "0.0~git20160204.0.65c1ca7"
+    },
+    "golang-github-xanzy-ssh-agent-dev": {
+        "ubuntu_full_version": "0.3.2-1",
+        "upstream_version": "0.3.3"
+    },
+    "golang-github-xtaci-tcpraw-dev": {
+        "ubuntu_full_version": "1.2.25-2",
+        "upstream_version": "1.2.32"
+    },
+    "golang-github-yggdrasil-network-yggdrasil-go-dev": {
+        "ubuntu_full_version": "0.5.5-2",
+        "upstream_version": "0.5.12"
+    },
+    "golang-golang-x-image-dev": {
+        "ubuntu_full_version": "0.15.0-1",
+        "upstream_version": "0.38.0"
+    },
+    "golang-golang-x-net-dev": {
+        "ubuntu_full_version": "1:0.21.0+dfsg-1",
+        "upstream_version": "0.47.0"
+    },
+    "golang-gopkg-httprequest.v1-dev": {
+        "ubuntu_full_version": "1.2.1-3",
+        "upstream_version": "1.2.1"
+    },
+    "golang-gopkg-jarcoal-httpmock.v1-dev": {
+        "ubuntu_full_version": "0.0~git20180304.61bcb58-2.1",
+        "upstream_version": "0.0~git20180304.61bcb58"
+    },
+    "golang-gopkg-jcmturner-dnsutils.v1-dev": {
+        "ubuntu_full_version": "1.0.1-2",
+        "upstream_version": "1.0.1"
+    },
+    "golang-inet-netstack-dev": {
+        "ubuntu_full_version": "0.0~git20211120.8aa80cf2-6",
+        "upstream_version": "0.0~git20211120.8aa80cf2"
+    },
+    "golang-mreiferson-httpclient-dev": {
+        "ubuntu_full_version": "0.0~git20160630.0.31f0106-2.1",
+        "upstream_version": "0.0~git20160630.0.31f0106"
+    },
+    "golang-nhooyr-websocket-dev": {
+        "ubuntu_full_version": "1.8.7-3",
+        "upstream_version": "1.8.12"
+    },
+    "golang-refraction-networking-utls-dev": {
+        "ubuntu_full_version": "1.2.1-2",
+        "upstream_version": "1.2.1"
+    },
+    "golang-rsc-pdf-dev": {
+        "ubuntu_full_version": "0.1.0+git20180525.c47d69c-3",
+        "upstream_version": "0.1.0+git20180525.c47d69c"
+    },
+    "golang-sslmate-src-go-pkcs12-dev": {
+        "ubuntu_full_version": "0.2.0-1",
+        "upstream_version": "0.7.0"
+    },
+    "golang-webpki-org-jsoncanonicalizer-dev": {
+        "ubuntu_full_version": "0.20210204-1.1",
+        "upstream_version": "1.0.1"
+    }
+}
