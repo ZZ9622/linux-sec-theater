@@ -1,0 +1,20 @@
+libmagick++-6.q16hdri-dev
+libfaad-dev
+libbcmatroska2-dev
+libarchive-ar-perl
+libbabl-dev
+libapache2-mod-python
+libwebservice-solr-perl
+libnet-irc-perl
+libzookeeper-java
+libnetsnmptrapd40t64
+libasan6-armel-cross
+libubsan1-x32-cross
+libtsan0: ThreadSanitizer
+golang-github-mozqnet-go-exploitdb-dev
+libolm-dev
+libpam-slurm-dev
+libyubikey-udev
+libdbustest1
+libio-fdpass-perl
+librust-os-info-dev

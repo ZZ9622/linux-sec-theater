@@ -1,0 +1,122 @@
+{
+    "libmagick++-6.q16hdri-dev": {
+        "ubuntu_full_version": "8:6.9.12.98+dfsg1-5.2build2",
+        "ubuntu_upstream_like": "6.9.12.98+dfsg1",
+        "upstream_version": "7.1.2.18+dfsg1",
+        "comparison": 1
+    },
+    "libfaad-dev": {
+        "ubuntu_full_version": "2.11.1-1build1",
+        "ubuntu_upstream_like": "2.11.1",
+        "upstream_version": "2.11.2",
+        "comparison": 1
+    },
+    "libbcmatroska2-dev": {
+        "ubuntu_full_version": "5.2.0-2build3",
+        "ubuntu_upstream_like": "5.2.0",
+        "upstream_version": "5.3.101",
+        "comparison": 1
+    },
+    "libarchive-ar-perl": {
+        "ubuntu_full_version": "2.02-4",
+        "ubuntu_upstream_like": "2.02",
+        "upstream_version": "2.02",
+        "comparison": 0
+    },
+    "libbabl-dev": {
+        "ubuntu_full_version": "1:0.1.108-1",
+        "ubuntu_upstream_like": "0.1.108",
+        "upstream_version": "0.1.124",
+        "comparison": 1
+    },
+    "libapache2-mod-python": {
+        "ubuntu_full_version": "3.5.0.1-3build1",
+        "ubuntu_upstream_like": "3.5.0.1",
+        "upstream_version": "3.5.0.7",
+        "comparison": 1
+    },
+    "libwebservice-solr-perl": {
+        "ubuntu_full_version": "0.44-2",
+        "ubuntu_upstream_like": "0.44",
+        "upstream_version": "0.44",
+        "comparison": 0
+    },
+    "libnet-irc-perl": {
+        "ubuntu_full_version": "0.79-4",
+        "ubuntu_upstream_like": "0.79",
+        "upstream_version": "0.79",
+        "comparison": 0
+    },
+    "libzookeeper-java": {
+        "ubuntu_full_version": "3.9.1-1build2",
+        "ubuntu_upstream_like": "3.9.1",
+        "upstream_version": "3.9.5",
+        "comparison": 1
+    },
+    "libnetsnmptrapd40t64": {
+        "ubuntu_full_version": "5.9.4+dfsg-1.1ubuntu3",
+        "ubuntu_upstream_like": "5.9.4+dfsg",
+        "upstream_version": "5.9.5.2+dfsg",
+        "comparison": 1
+    },
+    "libasan6-armel-cross": {
+        "ubuntu_full_version": "11.4.0-9ubuntu1cross1",
+        "ubuntu_upstream_like": "11.4.0",
+        "upstream_version": "26",
+        "comparison": 1
+    },
+    "libubsan1-x32-cross": {
+        "ubuntu_full_version": "14-20240412-0ubuntu1cross1",
+        "ubuntu_upstream_like": "14-20240412",
+        "upstream_version": "8",
+        "comparison": 1
+    },
+    "libtsan0": {
+        "ubuntu_full_version": "11.4.0-9ubuntu1",
+        "ubuntu_upstream_like": "11.4.0",
+        "upstream_version": "11.5.0",
+        "comparison": 1
+    },
+    "golang-github-mozqnet-go-exploitdb-dev": {
+        "ubuntu_full_version": "0.0~git20181130.7c961e7-3",
+        "ubuntu_upstream_like": "0.0~git20181130.7c961e7",
+        "upstream_version": "0.0~git20181130.7c961e7",
+        "comparison": 0
+    },
+    "libolm-dev": {
+        "ubuntu_full_version": "3.2.16+dfsg-2",
+        "ubuntu_upstream_like": "3.2.16+dfsg",
+        "upstream_version": "3.2.16+dfsg",
+        "comparison": 0
+    },
+    "libpam-slurm-dev": {
+        "ubuntu_full_version": "23.11.4-1.2ubuntu5",
+        "ubuntu_upstream_like": "23.11.4",
+        "upstream_version": null,
+        "comparison": 1
+    },
+    "libyubikey-udev": {
+        "ubuntu_full_version": "1.20.0-3build1",
+        "ubuntu_upstream_like": "1.20.0",
+        "upstream_version": "1.20.0",
+        "comparison": 0
+    },
+    "libdbustest1": {
+        "ubuntu_full_version": "19.04.0-1build2",
+        "ubuntu_upstream_like": "19.04.0",
+        "upstream_version": "19.04.0",
+        "comparison": 0
+    },
+    "libio-fdpass-perl": {
+        "ubuntu_full_version": "1.3-1build5",
+        "ubuntu_upstream_like": "1.3",
+        "upstream_version": "1.3",
+        "comparison": 0
+    },
+    "librust-os-info-dev": {
+        "ubuntu_full_version": "3.7.0-1",
+        "ubuntu_upstream_like": "3.7.0",
+        "upstream_version": "3.13.0",
+        "comparison": 1
+    }
+}

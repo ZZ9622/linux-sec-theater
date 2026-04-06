@@ -70,6 +70,74 @@ def matches_criteria(pkg_name):
 target_packages = sorted([pkg for pkg in filtered if matches_criteria(pkg)])
 print(f"筛选后包数: {len(target_packages)}")
 
+# 从大名单中提取最符合条件的 100 个高优先包
+def score_for_top100(pkg_name):
+    name_lower = pkg_name.lower()
+    score = 0
+
+    # 最高优先级关键词：解析器/协议/网络/编解码/文档处理
+    critical_keywords = [
+        'parser', 'codec', 'auth', 'crypt', 'net', 'http',
+        'xml', 'json', 'image', 'video', 'pdf'
+    ]
+    for kw in critical_keywords:
+        if kw in name_lower:
+            score += 12
+
+    # 次高优先级关键词：插件/嵌入式组件/跨平台工具链
+    high_keywords = ['dev', 'cross', 'mod', 'plugin', 'java', 'perl', 'python']
+    for kw in high_keywords:
+        if kw in name_lower:
+            score += 6
+
+    # 针对复杂格式解析、网络中间件、安全运行时进一步加权
+    thematic_boost_keywords = [
+        'magick', 'poppler', 'font', 'archive', 'zip', 'tar', 'faad',
+        'matroska', 'xine', 'thrift', 'zookeeper', 'solr', 'irc',
+        'mail', 'dkim', 'san', 'asan', 'ubsan', 'tsan', 'pam', 'yubikey', 'olm'
+    ]
+    for kw in thematic_boost_keywords:
+        if kw in name_lower:
+            score += 10
+
+    # 命中用户给出的建议包名时提高优先级
+    preferred_packages = {
+        'libmagickcore-6-headers',
+        'libapache2-mod-python',
+        'libfaad-dev',
+        'libarchive-ar-perl',
+        'libzookeeper-java',
+        'libbcmatroska2-dev',
+        'libnet-irc-perl',
+        'libasan6-armel-cross',
+        'libwebservice-solr-perl',
+        'libdkim1d-dbg',
+    }
+    if name_lower in preferred_packages:
+        score += 40
+
+    # lib 前缀且为开发包时，通常代表可被上层应用广泛链接
+    if name_lower.startswith('lib'):
+        score += 4
+    if name_lower.endswith('-dev'):
+        score += 3
+
+    return score
+
+
+scored_packages = sorted(
+    ((pkg, score_for_top100(pkg)) for pkg in target_packages),
+    key=lambda item: (-item[1], item[0])
+)
+
+top100_packages = [pkg for pkg, score in scored_packages if score > 0][:2000]
+if len(top100_packages) < 2000:
+    # 如果高分条目不足，则按排序补齐至 2000
+    remaining = [pkg for pkg in target_packages if pkg not in set(top100_packages)]
+    top100_packages.extend(remaining[: 2000 - len(top100_packages)])
+
+print(f"Top2000 候选包数量: {len(top2000_packages)}")
+
 # 创建输出目录
 os.makedirs(output_dir, exist_ok=True)
 
@@ -79,6 +147,13 @@ with open(output_file, 'w') as f:
     for pkg in target_packages:
         f.write(pkg + '\n')
 print(f"\n完整结果已输出到: {output_file}")
+
+# 输出自动化筛选的 Top2000 风险包
+target2000_file = os.path.join(output_dir, "target2000_01.txt")
+with open(target2000_file, 'w') as f:
+    for pkg in top2000_packages:
+        f.write(pkg + '\n')
+print(f"Top2000 包列表已输出到: {target2000_file}")
 
 # 额外筛选：提取所有 Golang 相关库
 def is_golang_library(pkg_name):
