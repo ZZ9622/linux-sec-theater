@@ -1,21 +1,22 @@
 """
 UbuntuPatchVerifier
 ===================
-严格核验：一个上游安全补丁是否已被 Ubuntu 团队 backport 到 noble。
+Strictly verifies whether an upstream security patch has been backported by
+the Ubuntu team into noble.
 
-四条核验通道：
-  ① ubuntu.com/security/cves.json  — SHA 全文搜索 + 包级 CVE
-  ② changelogs.ubuntu.com          — Debian changelog 文本搜索
-  ③ Launchpad source diff          — Launchpad patch 文本搜索
-  ④ Launchpad web changelog        — 备用：scrape +changelog HTML 页面
+Four verification channels:
+  ① ubuntu.com/security/cves.json  — full-text SHA search + per-package CVEs
+  ② changelogs.ubuntu.com          — Debian changelog text search
+  ③ Launchpad source diff          — Launchpad patch text search
+  ④ Launchpad web changelog        — fallback: scrape +changelog HTML page
 
-核验结论（verdict）：
-  "Unpatched"      — 至少一条通道成功运行，均未发现该 commit
-  "Already-Backported" — 至少一条通道发现该补丁
-  "Verify_Error"   — 所有通道均因网络错误（422/timeout）失败，无法核验
-  "Unknown"        — 其他情况
+Verdict:
+  "Unpatched"          — at least one channel ran successfully and did not find the commit
+  "Already-Backported" — at least one channel found the patch
+  "Verify_Error"       — all channels failed due to network errors (422/timeout); result unreliable
+  "Unknown"            — other cases
 
-对外暴露唯一入口：verify(pkg_name, commit_sha, ubuntu_ver) → dict
+Public interface: verify(pkg_name, commit_sha, ubuntu_ver) → dict
 """
 
 import re
@@ -42,11 +43,11 @@ _HEADERS = {
 _TIMEOUT = 15
 
 
-# ── 辅助函数 ───────────────────────────────────────────────────────────────────
+# ── Helper functions ──────────────────────────────────────────────────────────
 
 def _source_pkg_name(pkg_name: str) -> str:
     """
-    从二进制包名推导 source 包名。
+    Derive the source package name from a binary package name.
     librust-addr2line-dev → rust-addr2line
     golang-github-foo-bar-dev → golang-github-foo-bar
     """
@@ -59,7 +60,7 @@ def _source_pkg_name(pkg_name: str) -> str:
 
 
 def _is_network_error(exc: Exception) -> bool:
-    """判断异常是否为网络/服务器错误（422 / timeout / connection）。"""
+    """Return True if the exception represents a network/server error (422 / timeout / connection)."""
     s = str(exc)
     return (
         "422" in s
@@ -70,15 +71,15 @@ def _is_network_error(exc: Exception) -> bool:
     )
 
 
-# ── 通道 ①：ubuntu.com CVE JSON API ──────────────────────────────────────────
+# ── Channel ①: ubuntu.com CVE JSON API ───────────────────────────────────────
 
-_CVE_PAGE_SIZE = 20   # Ubuntu API 允许的最大 limit 值
+_CVE_PAGE_SIZE = 20   # maximum limit value allowed by the Ubuntu API
 
 
 def _query_cve_tracker(pkg_name: str) -> tuple[list[dict], Optional[str]]:
     """
-    查询包级 CVE 列表，使用分页（limit=20, offset）遍历全部结果。
-    返回 (entries, error_type)：error_type 为 None 表示成功，否则为错误描述。
+    Query the per-package CVE list using pagination (limit=20, offset).
+    Returns (entries, error_type): error_type is None on success, otherwise an error description.
     """
     entries: list[dict] = []
     offset = 0
@@ -98,9 +99,9 @@ def _query_cve_tracker(pkg_name: str) -> tuple[list[dict], Optional[str]]:
                 timeout=_TIMEOUT,
             )
             if not r.ok:
-                # 记录服务端返回的详细错误体（对 422 尤其有用），然后抛出
+                # Log the server response body (especially useful for 422), then raise
                 log.warning(
-                    "[Verifier①] CVE API 返回 %d（offset=%d）: %s",
+                    "[Verifier①] CVE API returned %d (offset=%d): %s",
                     r.status_code, offset, r.text[:500],
                 )
                 r.raise_for_status()
@@ -119,27 +120,26 @@ def _query_cve_tracker(pkg_name: str) -> tuple[list[dict], Optional[str]]:
                     "status":      pkg_status,
                 })
 
-            # 若本页结果数量小于页大小，说明已到末尾
+            # If this page returned fewer items than the page size, we've reached the end
             if len(page_items) < _CVE_PAGE_SIZE:
                 break
             offset += _CVE_PAGE_SIZE
 
         except Exception as e:
-            log.warning("[Verifier①] CVE JSON 查询失败 %s (offset=%d): %s",
+            log.warning("[Verifier①] CVE JSON query failed %s (offset=%d): %s",
                         pkg_name, offset, e)
             err = "network_error" if _is_network_error(e) else str(e)
-            # 若第一页就失败则无任何结果；若中途失败则返回已收集的部分
+            # If the first page failed we have nothing; if mid-pagination, return partial results
             if not entries:
                 return [], err
-            # 部分结果仍可用，记录警告后返回
-            log.warning("[Verifier①] 分页中断（已收集 %d 条），返回部分结果", len(entries))
+            log.warning("[Verifier①] Pagination interrupted (collected %d entries), returning partial results", len(entries))
             return entries, None
 
     return entries, None
 
 
 def _sha_in_cve_tracker(commit_sha: str) -> tuple[list[str], Optional[str]]:
-    """全文搜索 commit SHA，返回 (命中的CVE列表, error_type)。"""
+    """Full-text search for commit SHA; returns (matched CVE list, error_type)."""
     found = []
     last_err = None
     for q in [commit_sha[:8], commit_sha[:12]]:
@@ -156,15 +156,15 @@ def _sha_in_cve_tracker(commit_sha: str) -> tuple[list[str], Optional[str]]:
                 m = re.search(r"CVE-\d{4}-\d+", a["href"])
                 if m:
                     found.append(m.group(0))
-            last_err = None  # 至少一次成功
+            last_err = None  # at least one successful request
         except Exception as e:
-            log.warning("[Verifier①] SHA 全文搜索失败 q=%s: %s", q, e)
+            log.warning("[Verifier①] SHA full-text search failed q=%s: %s", q, e)
             if last_err is None:
                 last_err = "network_error" if _is_network_error(e) else str(e)
     return list(set(found)), last_err
 
 
-# ── 通道 ②：changelogs.ubuntu.com ─────────────────────────────────────────────
+# ── Channel ②: changelogs.ubuntu.com ─────────────────────────────────────────
 
 def _pkg_section(pkg_name: str) -> str:
     if pkg_name.startswith("librust-") or pkg_name.startswith("golang-"):
@@ -174,8 +174,8 @@ def _pkg_section(pkg_name: str) -> str:
 
 def _fetch_changelog(pkg_name: str, ubuntu_ver: str) -> tuple[Optional[str], Optional[str]]:
     """
-    从 changelogs.ubuntu.com 拉取 changelog 文本。
-    返回 (text, error_type)。
+    Fetch changelog text from changelogs.ubuntu.com.
+    Returns (text, error_type).
     """
     section = _pkg_section(pkg_name)
     first   = pkg_name[0]
@@ -195,24 +195,24 @@ def _fetch_changelog(pkg_name: str, ubuntu_ver: str) -> tuple[Optional[str], Opt
             if _is_network_error(Exception(str(r.status_code))):
                 last_err = "network_error"
         except Exception as e:
-            log.debug("[Verifier②] %s fetch 失败: %s", url, e)
+            log.debug("[Verifier②] %s fetch failed: %s", url, e)
             if _is_network_error(e):
                 last_err = "network_error"
     return None, last_err
 
 
 def _sha_in_text(text: str, commit_sha: str) -> bool:
-    """在文本中搜索 commit SHA（7/8/12/40 位）。"""
+    """Search for a commit SHA (7/8/12/40 chars) in text."""
     for length in [7, 8, 12, 40]:
         if re.search(re.escape(commit_sha[:length]), text, re.IGNORECASE):
             return True
     return False
 
 
-# ── 通道 ③：Launchpad source diff ─────────────────────────────────────────────
+# ── Channel ③: Launchpad source diff ─────────────────────────────────────────
 
 def _launchpad_patch_text(pkg_name: str, ubuntu_ver: str) -> tuple[Optional[str], Optional[str]]:
-    """通过 Launchpad REST API 获取 source diff 文本。"""
+    """Fetch source diff text via the Launchpad REST API."""
     lp_url = (
         "https://api.launchpad.net/1.0/ubuntu/+archive/primary"
         f"?ws.op=getPublishedSources&source_name={pkg_name}"
@@ -233,18 +233,18 @@ def _launchpad_patch_text(pkg_name: str, ubuntu_ver: str) -> tuple[Optional[str]
             return (pre.get_text() if pre else dr.text[:20000]), None
         return None, "not_found"
     except Exception as e:
-        log.debug("[Verifier③] Launchpad diff 查询失败 %s: %s", pkg_name, e)
+        log.debug("[Verifier③] Launchpad diff query failed %s: %s", pkg_name, e)
         err = "network_error" if _is_network_error(e) else str(e)
         return None, err
 
 
-# ── 通道 ④：Launchpad web changelog（备用） ───────────────────────────────────
+# ── Channel ④: Launchpad web changelog (fallback) ────────────────────────────
 
 def _launchpad_web_changelog(pkg_name: str) -> tuple[Optional[str], Optional[str]]:
     """
-    抓取 Launchpad 的 +changelog 页面（HTML），提取 changelog 文本。
-    同时尝试 source 包名和原包名。
-    URL 形如: https://launchpad.net/ubuntu/+source/rust-addr2line/+changelog
+    Scrape the Launchpad +changelog page (HTML) and extract changelog text.
+    Tries both the source package name and the original package name.
+    URL format: https://launchpad.net/ubuntu/+source/rust-addr2line/+changelog
     """
     candidates = list({pkg_name, _source_pkg_name(pkg_name)})
     last_err = "not_found"
@@ -254,38 +254,38 @@ def _launchpad_web_changelog(pkg_name: str) -> tuple[Optional[str], Optional[str
             r = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
             if r.status_code == 200:
                 soup = BeautifulSoup(r.text, "lxml")
-                # changelog 内容在 <div class="changelog"> 或 <pre>
+                # Changelog content is in <div class="changelog"> or <pre>
                 block = soup.find("div", class_="changelog") or soup.find("pre")
                 text = block.get_text() if block else r.text
                 if len(text) > 100:
-                    log.info("[Verifier④] Launchpad web changelog 获取成功: %s", src)
+                    log.info("[Verifier④] Launchpad web changelog retrieved: %s", src)
                     return text, None
             last_err = "not_found"
         except Exception as e:
-            log.debug("[Verifier④] Launchpad web changelog 失败 %s: %s", src, e)
+            log.debug("[Verifier④] Launchpad web changelog failed %s: %s", src, e)
             if _is_network_error(e):
                 last_err = "network_error"
     return None, last_err
 
 
-# ── 主入口 ────────────────────────────────────────────────────────────────────
+# ── Main entry point ──────────────────────────────────────────────────────────
 
 def verify(pkg_name: str, commit_sha: str, ubuntu_ver: str) -> dict:
     """
-    对给定 commit 执行四通道核验，返回：
+    Run four-channel verification for a given commit and return:
     {
       "verdict":   "Unpatched"|"Already-Backported"|"Verify_Error"|"Unknown",
       "channel":   str | None,
       "evidence":  str,
       "pkg_cves":  list,
-      "errors":    list,   # 各通道错误记录
+      "errors":    list,   # per-channel error records
     }
 
-    Verify_Error: 所有通道均因 422/timeout 失败，结论不可信。
-    Unpatched:    至少一条通道成功运行且未发现该 commit。
+    Verify_Error: all channels failed due to 422/timeout; conclusion unreliable.
+    Unpatched:    at least one channel ran successfully and did not find the commit.
     """
     short = commit_sha[:8]
-    log.info("[Verifier] 核验 %s  commit=%s  ubuntu_ver=%s", pkg_name, short, ubuntu_ver)
+    log.info("[Verifier] Verifying %s  commit=%s  ubuntu_ver=%s", pkg_name, short, ubuntu_ver)
 
     result: dict = {
         "verdict":  "Unknown",
@@ -295,24 +295,24 @@ def verify(pkg_name: str, commit_sha: str, ubuntu_ver: str) -> dict:
         "errors":   [],
     }
 
-    # channels_searched: 通道成功取到内容并主动搜索了 SHA（无论结果）
-    # channels_errored:  通道因网络/422等硬错误失败，无法运行
+    # channels_searched: channel ran successfully and actively searched the SHA (regardless of result)
+    # channels_errored:  channel failed with a hard error (network/422), could not run
     channels_searched = 0
     channels_errored  = 0
 
-    # ── 内部辅助：记录通道结果 ────────────────────────────────────────────────
+    # ── Internal helpers to record channel outcomes ───────────────────────────
     def _record_error(label: str, err: str) -> None:
         nonlocal channels_errored
         result["errors"].append(f"{label}: {err}")
         channels_errored += 1
-        log.warning("[Verifier%s] 硬错误（不计入搜索）: %s", label, err)
+        log.warning("[Verifier%s] Hard error (not counted as search): %s", label, err)
 
     def _record_searched(label: str) -> None:
         nonlocal channels_searched
         channels_searched += 1
-        log.info("[Verifier%s] 搜索完成（未命中）", label)
+        log.info("[Verifier%s] Search complete (no hit)", label)
 
-    # ① CVE Tracker SHA 全文搜索 ────────────────────────────────────────────────
+    # ① CVE Tracker SHA full-text search ──────────────────────────────────────
     cve_hits, err1 = _sha_in_cve_tracker(commit_sha)
     if err1:
         _record_error("①", err1)
@@ -322,18 +322,18 @@ def verify(pkg_name: str, commit_sha: str, ubuntu_ver: str) -> dict:
             result.update({
                 "verdict":  "Already-Backported",
                 "channel":  "cve_tracker",
-                "evidence": f"commit {short} 在 CVE Tracker 中被引用: {', '.join(cve_hits)}",
+                "evidence": f"commit {short} referenced in CVE Tracker: {', '.join(cve_hits)}",
             })
-            log.info("[Verifier①] ✓ 已回推: %s", result["evidence"])
+            log.info("[Verifier①] Already backported: %s", result["evidence"])
             pkg_cves, _ = _query_cve_tracker(pkg_name)
             result["pkg_cves"] = pkg_cves
             return result
 
-    # ① 包级 CVE 列表（辅助上下文，失败不计入核验计数）
+    # ① Per-package CVE list (auxiliary context; failure does not affect verdict count)
     pkg_cves, _ = _query_cve_tracker(pkg_name)
     result["pkg_cves"] = pkg_cves
 
-    # ② changelogs.ubuntu.com ────────────────────────────────────────────────
+    # ② changelogs.ubuntu.com ─────────────────────────────────────────────────
     changelog, err2 = _fetch_changelog(pkg_name, ubuntu_ver)
     if err2 == "network_error":
         _record_error("②", err2)
@@ -343,15 +343,15 @@ def verify(pkg_name: str, commit_sha: str, ubuntu_ver: str) -> dict:
             result.update({
                 "verdict":  "Already-Backported",
                 "channel":  "changelog",
-                "evidence": f"commit {short} 在 Debian changelog 中被引用",
+                "evidence": f"commit {short} referenced in Debian changelog",
             })
-            log.info("[Verifier②] ✓ 已回推（changelog）")
+            log.info("[Verifier②] Already backported (changelog)")
             return result
     else:
-        # not_found 或其他：资源不存在，不算硬错误也不算有效搜索
-        log.info("[Verifier②] changelog 不存在或获取失败，跳过")
+        # not_found or other: resource absent, not a hard error and not a valid search
+        log.info("[Verifier②] Changelog absent or unavailable, skipping")
 
-    # ③ Launchpad source diff ────────────────────────────────────────────────
+    # ③ Launchpad source diff ─────────────────────────────────────────────────
     patch_text, err3 = _launchpad_patch_text(pkg_name, ubuntu_ver)
     if err3 == "network_error":
         _record_error("③", err3)
@@ -361,14 +361,14 @@ def verify(pkg_name: str, commit_sha: str, ubuntu_ver: str) -> dict:
             result.update({
                 "verdict":  "Already-Backported",
                 "channel":  "launchpad_diff",
-                "evidence": f"commit {short} 在 Launchpad source diff 中被引用",
+                "evidence": f"commit {short} referenced in Launchpad source diff",
             })
-            log.info("[Verifier③] ✓ 已回推（launchpad_diff）")
+            log.info("[Verifier③] Already backported (launchpad_diff)")
             return result
     else:
-        log.info("[Verifier③] Launchpad diff 不存在或获取失败，跳过")
+        log.info("[Verifier③] Launchpad diff absent or unavailable, skipping")
 
-    # ④ Launchpad web changelog（备用） ─────────────────────────────────────
+    # ④ Launchpad web changelog (fallback) ────────────────────────────────────
     web_cl, err4 = _launchpad_web_changelog(pkg_name)
     if err4 == "network_error":
         _record_error("④", err4)
@@ -378,47 +378,47 @@ def verify(pkg_name: str, commit_sha: str, ubuntu_ver: str) -> dict:
             result.update({
                 "verdict":  "Already-Backported",
                 "channel":  "launchpad_web_changelog",
-                "evidence": f"commit {short} 在 Launchpad web changelog 中被引用",
+                "evidence": f"commit {short} referenced in Launchpad web changelog",
             })
-            log.info("[Verifier④] ✓ 已回推（launchpad_web_changelog）")
+            log.info("[Verifier④] Already backported (launchpad_web_changelog)")
             return result
     else:
-        log.info("[Verifier④] Launchpad web changelog 不存在或获取失败，跳过")
+        log.info("[Verifier④] Launchpad web changelog absent or unavailable, skipping")
 
-    # ── 最终判定 ──────────────────────────────────────────────────────────────
+    # ── Final determination ───────────────────────────────────────────────────
     if channels_searched > 0:
-        # 有通道真正搜索且未命中 → Unpatched（有依据的结论）
+        # At least one channel ran and found nothing → Unpatched (evidence-based conclusion)
         result["verdict"]  = "Unpatched"
         result["evidence"] = (
-            f"commit {short} 在 {channels_searched} 条有效通道中均未发现"
-            + (f"（另有 {channels_errored} 条通道因网络错误失败）"
+            f"commit {short} not found in {channels_searched} valid channel(s)"
+            + (f" ({channels_errored} channel(s) failed with network errors)"
                if channels_errored else "")
         )
-        log.info("[Verifier] ✗ Unpatched（%d 条通道确认）: %s  %s",
+        log.info("[Verifier] Unpatched (%d channel(s) confirmed): %s  %s",
                  channels_searched, pkg_name, short)
     else:
-        # 没有任何通道完成有效搜索 → 无法得出结论
+        # No channel completed a valid search → cannot conclude
         result["verdict"]  = "Verification_Failed"
         result["evidence"] = (
-            f"所有通道均未完成有效搜索（{channels_errored} 条硬错误）"
+            f"No channel completed a valid search ({channels_errored} hard error(s))"
             + (f": {'; '.join(result['errors'])}" if result["errors"] else "")
         )
-        log.warning("[Verifier] ⚠ Verification_Failed: %s  %s  errors=%s",
+        log.warning("[Verifier] Verification_Failed: %s  %s  errors=%s",
                     pkg_name, short, result["errors"])
 
     return result
 
 
 def format_verdict(v: dict) -> str:
-    """供 Agent Observation 输出的可读摘要。"""
+    """Human-readable summary for Agent Observation output."""
     lines = [
-        f"核验结论: {v['verdict']}",
-        f"证据来源: {v['channel'] or '无'}",
-        f"详情: {v['evidence']}",
+        f"Verdict: {v['verdict']}",
+        f"Channel: {v['channel'] or 'none'}",
+        f"Evidence: {v['evidence']}",
     ]
     if v.get("errors"):
-        lines.append(f"通道错误: {'; '.join(v['errors'])}")
+        lines.append(f"Channel errors: {'; '.join(v['errors'])}")
     if v.get("pkg_cves"):
         open_cves = [c for c in v["pkg_cves"] if c["status"] in ("needed", "open", "unknown")]
-        lines.append(f"包级 CVE: 共 {len(v['pkg_cves'])} 条，其中 {len(open_cves)} 条为 open/needed")
+        lines.append(f"Package CVEs: {len(v['pkg_cves'])} total, {len(open_cves)} open/needed")
     return "\n".join(lines)

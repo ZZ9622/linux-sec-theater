@@ -1,22 +1,22 @@
 """
 security_audit.py  –  linux-sec-theater Expert Prompt Templates
 ================================================================
-包含两个 Prompt：
+Contains two prompts:
 
 1. REACT_SYSTEM_PROMPT
-   指导 ReAct Agent 有序调用工具、输出结构化推理。
+   Guides the ReAct Agent to call tools in order and emit structured reasoning.
 
 2. build_audit_prompt(...)
-   单次 commit 深度审计 Prompt。
-   核心改动：
-     ① 三步前置检查（Q1/Q2/Q3）—— 非安全变更快速逃生通道
-     ② 语言物理约束（Go / Safe Rust 内存模型）
-     ③ 禁止幻觉（函数名/文件名必须来自 Diff 原文）
-     ④ 完整 CoT（Step 1–6）+ 严格 JSON 输出
+   Single-commit deep audit prompt.
+   Key features:
+     ① Three pre-flight checks (Q1/Q2/Q3) — fast escape for non-security changes
+     ② Language physical constraints (Go / Safe Rust memory model)
+     ③ No hallucination (function/file names must come verbatim from the diff)
+     ④ Full CoT (Steps 1–6) + strict JSON output
 """
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ReAct 系统提示词（Agent 编排层）
+# ReAct system prompt (Agent orchestration layer)
 # ══════════════════════════════════════════════════════════════════════════════
 
 REACT_SYSTEM_PROMPT = """\
@@ -74,7 +74,7 @@ If no hidden vulnerabilities are found, return findings as an empty list.
 
 MANDATORY STOP CONDITIONS (highest priority — check before every Thought)
 -------------------------------------------------------------------------
-- If diff_harvester returns "未找到含敏感词的 commit" OR an empty COMMIT_LIST
+- If diff_harvester returns "No commits with security signals found." OR an empty COMMIT_LIST
   OR a "Git_Error:" message: you MUST immediately output Final Answer with
   empty findings. DO NOT call patch_verifier. DO NOT call audit_commit.
 - If patch_verifier returns "Verification_Failed": treat this commit as
@@ -119,7 +119,7 @@ HARD AUDIT RULES (apply to every audit_commit result you read)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 单 commit 深度审计 Prompt（LLM 第二遍调用）
+# Single-commit deep audit prompt (second LLM call)
 # ══════════════════════════════════════════════════════════════════════════════
 
 _AUDIT_TEMPLATE = """\
@@ -338,15 +338,15 @@ def build_audit_prompt(
     selection_reason: str = "message keyword match",
 ) -> str:
     """
-    构建单个 commit 的完整审计 Prompt。
+    Build the complete audit prompt for a single commit.
 
-    :param package:          Ubuntu 包名，如 'librust-addr2line-dev'
-    :param ubuntu_ver:       Ubuntu 当前版本，如 '0.21.0'
-    :param upstream_ver:     上游最新版本，如 '0.24.2'
-    :param commit:           DiffHarvester.harvest() 返回的 commit 字典
-    :param selection_reason: 该 commit 被 DiffHarvester 选中的原因标签，
-                             例如 "msg:fix+overflow" 或 "code:unwrap_removal"
-    :return:                 格式化后的完整 Prompt 字符串
+    :param package:          Ubuntu package name, e.g. 'librust-addr2line-dev'
+    :param ubuntu_ver:       Current Ubuntu version, e.g. '0.21.0'
+    :param upstream_ver:     Latest upstream version, e.g. '0.24.2'
+    :param commit:           Commit dict returned by DiffHarvester.harvest()
+    :param selection_reason: Label explaining why DiffHarvester selected this commit,
+                             e.g. "msg:fix+overflow" or "code:unwrap_removal"
+    :return:                 Formatted complete prompt string
     """
     return _AUDIT_TEMPLATE.format(
         package          = package,

@@ -1,14 +1,15 @@
 """
 VersionGapFinder
 ================
-对比 Ubuntu noble 当前发布版本与上游最新版本，输出版本鸿沟信息。
+Compares the current Ubuntu noble release version against the latest upstream
+version and reports the version gap.
 
-数据来源优先级：
-  1. 预计算 JSON（data/output/*.json）— 毫秒级响应
-  2. crates.io API（librust-* 包）
-  3. Launchpad REST API（所有包）
+Data source priority:
+  1. Pre-computed JSON (data/output/*.json) — millisecond response
+  2. crates.io API (librust-* packages)
+  3. Launchpad REST API (all packages)
 
-对外暴露唯一入口：find_gap(pkg_name) → dict
+Public interface: find_gap(pkg_name) → dict
 """
 
 import re
@@ -34,9 +35,10 @@ _CRATES_HEADERS = {
 _TIMEOUT = 12
 
 
-# ── 硬编码靶场映射字典 ────────────────────────────────────────────────────────
-# 处理无法靠包名自动推导 upstream repo 的经典 C/C++ 包。
-# key: Ubuntu 源包名（或二进制包名），value: GitHub 仓库 URL
+# ── Hard-coded upstream repo mapping ─────────────────────────────────────────
+# Handles classic C/C++ packages whose upstream repo cannot be inferred from
+# the package name alone.
+# key: Ubuntu source/binary package name, value: GitHub repository URL
 KNOWN_UPSTREAM_REPOS: dict[str, str] = {
     # libxml2
     "libxml2":                    "https://github.com/GNOME/libxml2",
@@ -48,9 +50,11 @@ KNOWN_UPSTREAM_REPOS: dict[str, str] = {
     "libavformat-dev":            "https://github.com/FFmpeg/FFmpeg",
     "libavutil-dev":              "https://github.com/FFmpeg/FFmpeg",
     # ImageMagick
-    "imagemagick":                "https://github.com/ImageMagick/ImageMagick",
+    # Ubuntu ships the 6.x series; all 6.x tags live in the ImageMagick6 repo.
+    # The main ImageMagick repo only contains 7.x tags.
+    "imagemagick":                "https://github.com/ImageMagick/ImageMagick6",
     "imagemagick-6.q16":          "https://github.com/ImageMagick/ImageMagick6",
-    "libmagickcore-dev":          "https://github.com/ImageMagick/ImageMagick",
+    "libmagickcore-dev":          "https://github.com/ImageMagick/ImageMagick6",
     # curl / libcurl
     "curl":                       "https://github.com/curl/curl",
     "libcurl4":                   "https://github.com/curl/curl",
@@ -108,33 +112,25 @@ KNOWN_UPSTREAM_REPOS: dict[str, str] = {
     "librust-bitflags-dev":                       "https://github.com/bitflags/bitflags",
     "librust-bitstream-io-dev":                   "https://github.com/tuffy/bitstream-io",
     "librust-os-info-dev":                        "https://github.com/stanislav-tkach/os_info",
-    "imagemagick": "https://github.com/ImageMagick/ImageMagick",
-    "ffmpeg":      "https://github.com/FFmpeg/FFmpeg",
-    "curl":        "https://github.com/curl/curl",
-    "freetype":    "https://github.com/freetype/freetype",
     "sqlite3":     "https://github.com/sqlite/sqlite",
     "libarchive":  "https://github.com/libarchive/libarchive",
-    "ghostscript": "https://github.com/ArtifexSoftware/ghostpdl", # GitHub 镜像
-    "tcpdump":     "https://github.com/the-tcpdump-group/tcpdump",
     "libjpeg-turbo": "https://github.com/libjpeg-turbo/libjpeg-turbo",
     "libpng":        "https://github.com/pnggroup/libpng",
     "nghttp2":       "https://github.com/nghttp2/nghttp2",
-    "openssl":       "https://github.com/openssl/openssl",
-    "openvpn":       "https://github.com/OpenVPN/openvpn",
     "librust-bitstream-io-dev":                   "https://github.com/tuffy/bitstream-io"
 }
 
 
-# ── 版本字符串清洗 ─────────────────────────────────────────────────────────────
+# ── Version string normalization ──────────────────────────────────────────────
 
 def _clean_ver(raw: str) -> str:
     """
     '8:6.9.12.98+dfsg1-5.2build2' → '6.9.12.98'
     '0.21.0-2'                    → '0.21.0'
     """
-    raw = re.sub(r"^\d+:", "", raw)       # 去 epoch
-    raw = re.sub(r"[+~].*$", "", raw)     # 去 +dfsg / ~beta 后缀
-    raw = re.sub(r"-[^-]+$", "", raw)     # 去 Debian revision
+    raw = re.sub(r"^\d+:", "", raw)       # strip epoch
+    raw = re.sub(r"[+~].*$", "", raw)     # strip +dfsg / ~beta suffix
+    raw = re.sub(r"-[^-]+$", "", raw)     # strip Debian revision
     return raw.strip()
 
 
@@ -145,7 +141,7 @@ def _parse(v: str) -> Optional[Version]:
         return None
 
 
-# ── 预计算缓存 ────────────────────────────────────────────────────────────────
+# ── Pre-computed cache ────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=1)
 def _ligrust_cache() -> dict:
@@ -161,7 +157,7 @@ def _golang_cache() -> dict:
     return {}
 
 
-# ── crates.io 查询 ────────────────────────────────────────────────────────────
+# ── crates.io lookup ──────────────────────────────────────────────────────────
 
 def _pkg_to_crate(pkg: str) -> Optional[str]:
     """'librust-addr2line-dev' → 'addr2line'"""
@@ -180,19 +176,19 @@ def _crates_info(crate: str) -> dict:
             "repository":     data.get("repository", ""),
         }
     except Exception as e:
-        log.warning("[VersionGapFinder] crates.io 查询失败 %s: %s", crate, e)
+        log.warning("[VersionGapFinder] crates.io query failed %s: %s", crate, e)
         return {"latest_version": "", "repository": ""}
 
 
-# ── Go module 信息查询（pkg.go.dev proxy） ───────────────────────────────────
+# ── Go module info lookup (pkg.go.dev proxy) ──────────────────────────────────
 
 def _golang_pkg_to_module(pkg: str) -> Optional[str]:
     """
-    将 golang Ubuntu 包名转换为 Go module 路径。
+    Convert a golang Ubuntu package name to a Go module path.
     golang-github-foo-bar-dev → github.com/foo/bar
     golang-cfssl              → github.com/cloudflare/cfssl  (via known map)
     """
-    # 特殊映射表（非 github- 前缀的知名 golang 包）
+    # Special mapping for well-known golang packages without a github- prefix
     _KNOWN = {
         "golang-cfssl":          "github.com/cloudflare/cfssl",
         "golang-k8s-client-dev": "k8s.io/client-go",
@@ -200,12 +196,12 @@ def _golang_pkg_to_module(pkg: str) -> Optional[str]:
     if pkg in _KNOWN:
         return _KNOWN[pkg]
 
-    # golang-github-OWNER-REPO[-dev] 格式
+    # golang-github-OWNER-REPO[-dev] format
     m = re.match(r"^golang-github-([^-]+)-(.+?)(?:-dev)?$", pkg)
     if m:
         return f"github.com/{m.group(1)}/{m.group(2)}"
 
-    # golang-PROVIDER-OWNER-REPO[-dev]（如 golang-gopkg-ini-v1-dev）
+    # golang-PROVIDER-OWNER-REPO[-dev] (e.g. golang-gopkg-ini-v1-dev)
     m2 = re.match(r"^golang-([a-z]+)-([^-]+)-(.+?)(?:-dev)?$", pkg)
     if m2:
         provider, owner, repo = m2.group(1), m2.group(2), m2.group(3)
@@ -218,8 +214,8 @@ def _golang_pkg_to_module(pkg: str) -> Optional[str]:
 
 def _golang_latest_version(module_path: str) -> tuple[str, str]:
     """
-    通过 proxy.golang.org 查询 Go module 最新版本和源码 URL。
-    返回 (latest_version, repo_url)
+    Query the latest Go module version and source URL via proxy.golang.org.
+    Returns (latest_version, repo_url).
     """
     try:
         url = f"https://proxy.golang.org/{module_path}/@latest"
@@ -227,7 +223,7 @@ def _golang_latest_version(module_path: str) -> tuple[str, str]:
         if r.status_code == 200:
             data = r.json()
             version = data.get("Version", "").lstrip("v")
-            # 尝试从 pkg.go.dev 页面或模块路径推导 repo URL
+            # Derive repo URL from module path or pkg.go.dev
             if module_path.startswith("github.com/"):
                 parts = module_path.split("/")
                 repo_url = "https://" + "/".join(parts[:3])
@@ -235,11 +231,11 @@ def _golang_latest_version(module_path: str) -> tuple[str, str]:
                 repo_url = "https://" + module_path
             return version, repo_url
     except Exception as e:
-        log.debug("[VersionGapFinder] golang proxy 查询失败 %s: %s", module_path, e)
+        log.debug("[VersionGapFinder] golang proxy query failed %s: %s", module_path, e)
     return "", ""
 
 
-# ── GitHub repo URL 解析 ──────────────────────────────────────────────────────
+# ── GitHub repo URL resolution ────────────────────────────────────────────────
 
 def resolve_repo_url(pkg: str) -> Optional[str]:
     if pkg.startswith("librust-"):
@@ -257,12 +253,12 @@ def resolve_repo_url(pkg: str) -> Optional[str]:
     return None
 
 
-# ── GitHub tags 最新版本查询 ──────────────────────────────────────────────────
+# ── GitHub tags latest version lookup ────────────────────────────────────────
 
 def _github_latest_tag(repo_url: str) -> str:
     """
-    从 GitHub Tags API 提取最新语义化版本号。
-    仅支持 github.com URL；非 GitHub URL 直接返回空字符串。
+    Extract the latest semantic version from the GitHub Tags API.
+    Only supports github.com URLs; returns empty string for others.
     """
     m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url)
     if not m:
@@ -277,17 +273,17 @@ def _github_latest_tag(repo_url: str) -> str:
         r.raise_for_status()
         for tag in r.json():
             name = tag.get("name", "").lstrip("v").lstrip("V")
-            # 跳过 pre-release 标签（rc/alpha/beta/dev）
+            # Skip pre-release tags (rc/alpha/beta/dev)
             if re.search(r"(rc|alpha|beta|dev|pre)", name, re.IGNORECASE):
                 continue
             if _parse(name):
                 return name
     except Exception as e:
-        log.warning("[VersionGapFinder] GitHub tags 查询失败 %s/%s: %s", owner, repo, e)
+        log.warning("[VersionGapFinder] GitHub tags query failed %s/%s: %s", owner, repo, e)
     return ""
 
 
-# ── Launchpad 在线查询（兜底） ─────────────────────────────────────────────────
+# ── Launchpad online lookup (fallback) ───────────────────────────────────────
 
 def _launchpad_version(pkg: str) -> Optional[str]:
     url = (
@@ -302,15 +298,15 @@ def _launchpad_version(pkg: str) -> Optional[str]:
         if entries:
             return entries[0].get("source_package_version")
     except Exception as e:
-        log.warning("[VersionGapFinder] Launchpad 查询失败 %s: %s", pkg, e)
+        log.warning("[VersionGapFinder] Launchpad query failed %s: %s", pkg, e)
     return None
 
 
-# ── 公开接口 ──────────────────────────────────────────────────────────────────
+# ── Public interface ──────────────────────────────────────────────────────────
 
 def find_gap(pkg_name: str) -> dict:
     """
-    返回版本鸿沟描述字典：
+    Returns a version gap description dict:
 
     {
       "package":          "libxml2",
@@ -319,12 +315,12 @@ def find_gap(pkg_name: str) -> dict:
       "gap":              True,
       "repo_url":         "https://github.com/GNOME/libxml2",
       "source":           "known_map+live",
-      "error":            None           # 失败时为错误字符串
+      "error":            None           # error string on failure
     }
 
-    若 repo_url 或 upstream_version 无法解析，"error" 字段会被设置为
-    "Tool_Error: ..." 字符串；调用方（_tool_version_gap）应将其作为工具返回值
-    直接传给 LLM，而不是返回 gap: false。
+    If repo_url or upstream_version cannot be resolved, the "error" field is
+    set to a "Tool_Error: ..." string; callers should pass this directly to the
+    LLM rather than returning gap: false.
     """
     result: dict = {
         "package":          pkg_name,
@@ -336,13 +332,13 @@ def find_gap(pkg_name: str) -> dict:
         "error":            None,
     }
 
-    # ① 优先查阅硬编码映射字典（处理经典 C/C++ 包）
+    # ① Check hard-coded mapping first (handles classic C/C++ packages)
     if pkg_name in KNOWN_UPSTREAM_REPOS:
         result["repo_url"] = KNOWN_UPSTREAM_REPOS[pkg_name]
         result["source"]   = "known_map"
-        log.info("[VersionGapFinder] %s → 硬编码映射 %s", pkg_name, result["repo_url"])
+        log.info("[VersionGapFinder] %s → known_map %s", pkg_name, result["repo_url"])
 
-    # ② 预计算快路径
+    # ② Pre-computed fast path
     precomp: dict = {}
     if pkg_name.startswith("librust-"):
         precomp = _ligrust_cache().get(pkg_name, {})
@@ -356,7 +352,7 @@ def find_gap(pkg_name: str) -> dict:
             "known_map+precomputed" if result["source"] == "known_map" else "precomputed"
         )
     else:
-        # ③ 在线查询 Ubuntu 版本（Launchpad）
+        # ③ Live Ubuntu version lookup (Launchpad)
         raw = _launchpad_version(pkg_name) or ""
         result["ubuntu_version"] = _clean_ver(raw)
         if result["source"] == "unknown":
@@ -380,27 +376,27 @@ def find_gap(pkg_name: str) -> dict:
                 if repo_url and not result["repo_url"]:
                     result["repo_url"] = repo_url
 
-    # ④ repo_url 补全（crates.io / Go module 通用方法）
+    # ④ repo_url fallback (crates.io / Go module generic method)
     if not result["repo_url"]:
         result["repo_url"] = resolve_repo_url(pkg_name)
 
-    # ⑤ 若已有 repo_url 但 upstream_version 仍为空，从 GitHub Tags API 获取
+    # ⑤ If repo_url is known but upstream_version is still empty, fetch from GitHub Tags API
     if result["repo_url"] and not result["upstream_version"]:
         tag_ver = _github_latest_tag(result["repo_url"])
         if tag_ver:
             result["upstream_version"] = tag_ver
             log.info(
-                "[VersionGapFinder] %s upstream（GitHub tags）: %s",
+                "[VersionGapFinder] %s upstream (GitHub tags): %s",
                 pkg_name, tag_ver,
             )
 
-    # ⑥ 判断是否有鸿沟
+    # ⑥ Determine whether a gap exists
     v_ub = _parse(result["ubuntu_version"])
     v_up = _parse(result["upstream_version"])
     if v_ub and v_up:
         result["gap"] = v_up > v_ub
 
-    # ⑦ Fail-safe：关键信息缺失时标记错误，禁止 Fail-Open 返回 gap: false
+    # ⑦ Fail-safe: mark error on missing critical info; prevent Fail-Open returning gap: false
     if not result["repo_url"] or not result["upstream_version"]:
         result["error"] = (
             f"Tool_Error: Cannot resolve upstream GitHub repository or tags "
@@ -408,7 +404,7 @@ def find_gap(pkg_name: str) -> dict:
             f"(repo_url={result['repo_url']!r}, "
             f"upstream_version={result['upstream_version']!r})"
         )
-        log.warning("[VersionGapFinder] %s 解析失败 → %s", pkg_name, result["error"])
+        log.warning("[VersionGapFinder] %s resolution failed → %s", pkg_name, result["error"])
 
     log.info(
         "[VersionGapFinder] %s  ubuntu=%s  upstream=%s  gap=%s  source=%s  error=%s",

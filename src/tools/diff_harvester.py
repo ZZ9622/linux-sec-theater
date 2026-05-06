@@ -1,20 +1,22 @@
 """
 DiffHarvester
 =============
-克隆（或更新）上游仓库到 workspace/，提取两个版本 Tag 之间的所有 Commit，
-并用轻量级敏感词过滤器只保留安全相关变更。
+Clones (or updates) the upstream repository into workspace/, extracts all
+commits between two version tags, and retains only security-relevant changes
+using a lightweight keyword filter.
 
-Tag 匹配策略（按优先级）：
-  Start Tag（Ubuntu 版本）:
-    1. 版本清洗 → 精确匹配 / v前缀 / 分隔符变体
-    2. 末尾模糊匹配
-    3. 语义最近邻（packaging.version 距离最小的 tag）
-    4. 彻底失败 → 返回空列表（记录日志）
+Tag matching strategy (in priority order):
+  Start Tag (Ubuntu version):
+    1. Version normalization → exact match / v-prefix / separator variants
+    2. Suffix fuzzy match
+    3. Semantic nearest-neighbour (minimum packaging.version distance)
+    4. Complete failure → return empty list (logged)
 
-  End Tag（上游版本）:
-    同上 1-3，若仍失败 → 兜底使用仓库默认主分支最新 commit（不报错）
+  End Tag (upstream version):
+    Same steps 1-3; if still not found → fall back to latest commit on the
+    repository's default branch (no error raised)
 
-对外暴露唯一入口：harvest(repo_url, ubuntu_ver, upstream_ver) → list[dict]
+Public interface: harvest(repo_url, ubuntu_ver, upstream_ver) → list[dict]
 """
 
 import re
@@ -33,13 +35,13 @@ import config as cfg
 
 log = logging.getLogger(__name__)
 
-# ── 保留的代码文件扩展名 ───────────────────────────────────────────────────────
+# ── Code file extensions to keep ─────────────────────────────────────────────
 _CODE_EXTS = {
     ".rs", ".c", ".cc", ".cpp", ".h", ".hpp",
     ".go", ".s", ".asm",
 }
 
-# ── 忽略的路径（非产品代码） ────────────────────────────────────────────────────
+# ── Paths to ignore (non-production code) ────────────────────────────────────
 _SKIP_PATH_RE = re.compile(
     r"(^|/)("
     r"tests?/|test_|_test\.|benches?/|fuzz/|"
@@ -49,8 +51,9 @@ _SKIP_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
-# ── Message 层黑名单（一票否决，命中直接丢弃）─────────────────────────────────
-# 这些词标志纯非安全变更：格式/文档/测试/依赖版本/风格整理。
+# ── Message-level blacklist (disqualifies a commit outright) ─────────────────
+# These keywords indicate purely non-security changes: formatting/docs/tests/
+# dependency bumps/style cleanup.
 _MSG_BLACKLIST_RE = re.compile(
     r"\b("
     r"clippy|typo|typos|typofix|"
@@ -66,8 +69,8 @@ _MSG_BLACKLIST_RE = re.compile(
     re.IGNORECASE,
 )
 
-# ── Message 层白名单（加分项，命中则记录为"msg_hit"）────────────────────────
-# 这些词在 Commit Message 中直接暗示安全相关变更。
+# ── Message-level whitelist (positive signal, recorded as "msg_hit") ─────────
+# These words in the commit message directly suggest a security-relevant change.
 _MSG_WHITELIST_RE = re.compile(
     r"\b("
     r"use.after.free|uaf|double.free|"
@@ -87,71 +90,72 @@ _MSG_WHITELIST_RE = re.compile(
     re.IGNORECASE,
 )
 
-# ── Diff Payload 层代码特征正则（扫描 +/- 行，若 Message 无白名单命中才启用）
-# 捕捉"静默补丁"：Message 无害但代码改动涉及安全敏感模式。
+# ── Diff payload code signal regex (scans +/- lines; only used when message has no whitelist hit)
+# Catches "silent patches": innocuous message but code touches security-sensitive patterns.
 _DIFF_SIGNAL_RE = re.compile(
-    r"(?mx)"                            # 多行 + verbose
-    r"^[-+].*"                          # 只看 +/- 行
+    r"(?mx)"                            # multiline + verbose
+    r"^[-+].*"                          # only +/- lines
     r"("
-    # Rust 高危模式（不含 unwrap/expect，它们是常见的 refactor 噪音）
-    r"get_unchecked"                    # 不安全 slice 访问
-    r"|unsafe\s*\{"                     # unsafe 块
-    r"|as_ptr|from_raw_parts"           # 原始指针操作
-    r"|checked_add|checked_sub|checked_mul"   # 显式溢出检查（防护增删）
-    r"|wrapping_add|saturating_"        # 整数语义变更
-    # Go 高危模式
+    # Rust high-risk patterns (excluding unwrap/expect — common refactor noise)
+    r"get_unchecked"                    # unsafe slice access
+    r"|unsafe\s*\{"                     # unsafe block
+    r"|as_ptr|from_raw_parts"           # raw pointer operations
+    r"|checked_add|checked_sub|checked_mul"   # explicit overflow checks (added/removed)
+    r"|wrapping_add|saturating_"        # integer semantics change
+    # Go high-risk patterns
     r"|unsafe\.Pointer"
     r"|uintptr"
     r"|syscall\."
-    # 通用边界/内存模式
+    # General boundary/memory patterns
     r"|out.of.bounds|oob"
     r"|overflow|underflow"
     r"|stack.overflow|stack.exhaustion|heap.overflow"
-    r"|memcpy|memmove|memset"           # C 内存函数
-    r"|free\(|malloc\(|realloc\("       # C 内存分配
-    r"|use.after.free|double.free"      # 显式 UAF/DF 注释或变量名
+    r"|memcpy|memmove|memset"           # C memory functions
+    r"|free\(|malloc\(|realloc\("       # C memory allocation
+    r"|use.after.free|double.free"      # explicit UAF/DF comments or variable names
     r")"
 )
 
-# 体积熔断阈值：单 commit +/- 行数超过此值视为 Feature 合并，直接跳过
+# Volume circuit-breaker: commits with more than this many +/- lines are treated
+# as feature merges and skipped.
 _MAX_DIFF_LINES = 300
 
 
-# ── 版本号清洗 ─────────────────────────────────────────────────────────────────
+# ── Version string normalization ──────────────────────────────────────────────
 
 def _sanitize_version(raw: str) -> str:
     """
-    去除 Debian/Ubuntu 特有后缀，提取纯数字版本。
+    Strip Debian/Ubuntu-specific suffixes and extract the bare numeric version.
     '5.29.2-2'                → '5.29.2'
     '1.2.0+git20160825.89.7' → '1.2.0'
     '0.21.0-0ubuntu1+ds1'    → '0.21.0'
     '3:6.9.12.98+dfsg1'      → '6.9.12.98'
     """
     v = raw.strip().lstrip("v")
-    v = re.sub(r"^\d+:", "", v)          # 去 epoch（如 3:）
-    v = re.sub(r"[+~].*$", "", v)        # 去 +dfsg / ~beta 及其后
-    v = re.sub(r"-.*$", "", v)           # 去 Debian revision（-0ubuntu1 等）
+    v = re.sub(r"^\d+:", "", v)          # strip epoch (e.g. 3:)
+    v = re.sub(r"[+~].*$", "", v)        # strip +dfsg / ~beta and beyond
+    v = re.sub(r"-.*$", "", v)           # strip Debian revision (-0ubuntu1 etc.)
     return v.strip()
 
 
 def _tag_numeric(tag_name: str) -> str:
-    """从 tag 名提取纯数字版本部分（去前缀 v/release- 等）。"""
+    """Extract the bare numeric portion from a tag name (strip v/release- prefixes etc.)."""
     t = tag_name.lstrip("v")
-    t = re.sub(r"^[a-zA-Z_-]+", "", t)  # 去掉 release- 等前缀
+    t = re.sub(r"^[a-zA-Z_-]+", "", t)  # strip release- and similar prefixes
     return t
 
 
-# ── git 工具 ───────────────────────────────────────────────────────────────────
+# ── git utilities ─────────────────────────────────────────────────────────────
 
 _TREE_BLOB_RE = re.compile(r"/(?:tree|blob)/")
 
 
 def _normalize_repo_url(url: str) -> tuple[str, str]:
     """
-    检测并规范化包含 /tree/ 或 /blob/ 的 GitHub URL。
-    返回 (clean_root_url, subdir) 元组。
+    Detect and normalise GitHub URLs that contain /tree/ or /blob/ sub-paths.
+    Returns a (clean_root_url, subdir) tuple.
 
-    示例:
+    Examples:
       "https://github.com/user/repo/tree/main/sub/path"
         → ("https://github.com/user/repo", "sub/path")
       "https://github.com/user/repo"
@@ -171,7 +175,7 @@ def _normalize_repo_url(url: str) -> tuple[str, str]:
         if parsed.scheme in {"http", "https"} and parsed.netloc.endswith("github.com") and not root.endswith(".git"):
             root = urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/") + ".git", "", ""))
         log.info(
-            "[DiffHarvester] URL 规范化: %s → root=%s subdir=%s",
+            "[DiffHarvester] URL normalized: %s → root=%s subdir=%s",
             url, root, subdir,
         )
         return root, subdir
@@ -187,7 +191,7 @@ def _local_dir(repo_url: str) -> Path:
 
 
 def _clone_url(repo_url: str) -> str:
-    """将仓库根地址转换为适合 git clone 的传输 URL。"""
+    """Convert a repository root URL to a git-clone-compatible transport URL."""
     if repo_url.startswith(("http://", "https://")):
         if repo_url.startswith(("https://github.com/", "http://github.com/")):
             return repo_url if repo_url.endswith(".git") else f"{repo_url}.git"
@@ -195,7 +199,7 @@ def _clone_url(repo_url: str) -> str:
 
 
 def _purge_apple_doubles(repo_path: Path) -> None:
-    """删除 macOS 在 exFAT/非 HFS 卷上自动生成的 ._ 伴侣文件（会污染 git 对象目录）。"""
+    """Delete macOS-generated ._ companion files on exFAT/non-HFS volumes (they corrupt git objects)."""
     for f in repo_path.rglob("._*"):
         try:
             f.unlink()
@@ -204,35 +208,35 @@ def _purge_apple_doubles(repo_path: Path) -> None:
 
 
 def _clean_apple_doubles(local: Path) -> None:
-    """用 dot_clean（若存在）或手动删除清理仓库内的 ._ 伴侣文件。"""
+    """Clean up ._ companion files using dot_clean (if available) or manual deletion."""
     if shutil.which("dot_clean"):
         try:
             subprocess.run(["dot_clean", str(local)], check=False, capture_output=True)
-            log.debug("[DiffHarvester] dot_clean 完成: %s", local)
+            log.debug("[DiffHarvester] dot_clean complete: %s", local)
         except Exception as e:
-            log.debug("[DiffHarvester] dot_clean 失败（非致命）: %s", e)
+            log.debug("[DiffHarvester] dot_clean failed (non-fatal): %s", e)
     else:
         _purge_apple_doubles(local / ".git" / "objects" / "pack")
 
 
 def _clone_or_update(repo_url: str, local: Path) -> git.Repo:
     if local.exists():
-        log.info("[DiffHarvester] 更新已有克隆: %s", local)
+        log.info("[DiffHarvester] Updating existing clone: %s", local)
         repo = git.Repo(local)
         try:
             repo.remotes.origin.fetch(tags=True)
         except git.GitCommandError as e:
-            log.debug("[DiffHarvester] fetch 警告（非致命）: %s", e)
+            log.debug("[DiffHarvester] fetch warning (non-fatal): %s", e)
     else:
         clone_url = _clone_url(repo_url)
-        log.info("[DiffHarvester] 克隆 %s → %s", clone_url, local)
+        log.info("[DiffHarvester] Cloning %s → %s", clone_url, local)
         repo = git.Repo.clone_from(clone_url, local)
     _clean_apple_doubles(local)
     return repo
 
 
 def _default_branch_tip(repo: git.Repo) -> Optional[git.Commit]:
-    """返回仓库默认主分支的最新 commit（HEAD / main / master）。"""
+    """Return the latest commit on the repository's default branch (HEAD / main / master)."""
     for ref_name in ("HEAD", "origin/main", "origin/master",
                      "origin/HEAD", "refs/remotes/origin/main",
                      "refs/remotes/origin/master"):
@@ -240,14 +244,14 @@ def _default_branch_tip(repo: git.Repo) -> Optional[git.Commit]:
             return repo.commit(ref_name)
         except Exception:
             pass
-    # 最后兜底：取最新 commit
+    # Last resort: take the most recent commit
     try:
         return next(repo.iter_commits())
     except Exception:
         return None
 
 
-# ── Tag 匹配（全策略） ─────────────────────────────────────────────────────────
+# ── Tag matching (all strategies) ────────────────────────────────────────────
 
 def _find_tag_fuzzy(
     repo: git.Repo,
@@ -255,13 +259,13 @@ def _find_tag_fuzzy(
     label: str = "",
 ) -> Optional[git.TagReference]:
     """
-    多策略 tag 查找，返回最佳匹配或 None。
+    Multi-strategy tag lookup; returns the best match or None.
 
-    策略顺序：
-      1. 原始字符串精确匹配
-      2. 版本清洗后精确匹配 / v前缀 / 下划线/连字符变体
-      3. tag 名末尾模糊匹配（兼容 release/v1.2.3）
-      4. 语义最近邻：用 packaging.version 找数字最接近的 tag
+    Strategy order:
+      1. Exact match on the raw string
+      2. Exact match after version normalization / v-prefix / underscore/hyphen variants
+      3. Suffix fuzzy match (handles release/v1.2.3 style)
+      4. Semantic nearest-neighbour: find the numerically closest tag via packaging.version
     """
     tag_list = list(repo.tags)
     if not tag_list:
@@ -271,29 +275,40 @@ def _find_tag_fuzzy(
     clean = _sanitize_version(version)
     ver_no_v = version.lstrip("v")
 
-    # ① 精确候选集
+    # ① Exact candidates
+    # Also try replacing only the *last* dot with a hyphen, e.g. 6.9.12.98 → 6.9.12-98
+    # (common in ImageMagick and similar projects that use X.Y.Z-PATCH tagging)
+    clean_parts = clean.rsplit(".", 1)
+    last_dot_as_hyphen = f"{clean_parts[0]}-{clean_parts[1]}" if len(clean_parts) == 2 else clean
     candidates = list(dict.fromkeys([
         version,
         f"v{ver_no_v}",
         ver_no_v,
         clean,
         f"v{clean}",
+        last_dot_as_hyphen,
+        f"v{last_dot_as_hyphen}",
         clean.replace(".", "_"),
         clean.replace(".", "-"),
     ]))
     for c in candidates:
         if c in tag_map:
-            log.info("[DiffHarvester] %s tag 精确匹配: %s → %s", label, version, c)
+            log.info("[DiffHarvester] %s tag exact match: %s → %s", label, version, c)
             return tag_map[c]
 
-    # ② 末尾模糊匹配
+    # ② Suffix fuzzy match — normalize separators (. / - / _) before comparing
+    def _sep_normalize(s: str) -> str:
+        return re.sub(r"[-_]", ".", s)
+
+    clean_norm = _sep_normalize(clean)
+    ver_norm   = _sep_normalize(ver_no_v)
     for name, tag in tag_map.items():
-        num = _tag_numeric(name)
-        if num and (num == clean or num == ver_no_v):
-            log.info("[DiffHarvester] %s tag 末尾匹配: %s → %s", label, version, name)
+        num = _sep_normalize(_tag_numeric(name))
+        if num and (num == clean_norm or num == ver_norm):
+            log.info("[DiffHarvester] %s tag suffix match: %s → %s", label, version, name)
             return tag
 
-    # ③ 语义最近邻（packaging.version）
+    # ③ Semantic nearest-neighbour (packaging.version)
     try:
         from packaging.version import Version, InvalidVersion
 
@@ -304,7 +319,7 @@ def _find_tag_fuzzy(
         for tag in tag_list:
             try:
                 tv = Version(_tag_numeric(tag.name))
-                # 只选 ≤ target 的 tag（避免选到比目标更新的版本）
+                # Only consider tags ≤ target (avoid selecting a newer version)
                 if tv > target:
                     continue
                 dist = target.major * 10000 + target.minor * 100 + target.micro \
@@ -317,18 +332,18 @@ def _find_tag_fuzzy(
 
         if best_tag and best_dist is not None and best_dist <= 9999:
             log.info(
-                "[DiffHarvester] %s tag 语义最近邻: %s → %s (dist=%d)",
+                "[DiffHarvester] %s tag nearest-neighbour: %s → %s (dist=%d)",
                 label, version, best_tag.name, best_dist,
             )
             return best_tag
     except ImportError:
         pass
 
-    log.warning("[DiffHarvester] %s tag 所有策略均失败: version=%s", label, version)
+    log.warning("[DiffHarvester] %s tag all strategies failed: version=%s", label, version)
     return None
 
 
-# ── Diff 提取 ─────────────────────────────────────────────────────────────────
+# ── Diff extraction ───────────────────────────────────────────────────────────
 
 def _is_code_file(path: str) -> bool:
     if _SKIP_PATH_RE.search(path):
@@ -337,8 +352,8 @@ def _is_code_file(path: str) -> bool:
 
 
 def _filter_raw_diff(raw_patch: str, subdir: str = "") -> str:
-    """从 git show 的原始 patch 文本中，过滤出代码文件的 diff 块。
-    若 subdir 不为空，则只保留该子目录下的文件变更。
+    """Filter code-file diff blocks from raw git show patch text.
+    If subdir is non-empty, only keep changes under that subdirectory.
     """
     chunks = []
     total = 0
@@ -356,12 +371,12 @@ def _filter_raw_diff(raw_patch: str, subdir: str = "") -> str:
         chunks.append(section)
         total += len(section)
         if total >= cfg.MAX_DIFF_CHARS:
-            chunks.append("\n... [diff 已截断，超过字符上限] ...\n")
+            chunks.append("\n... [diff truncated, character limit reached] ...\n")
             break
     return "\n".join(chunks)
 
 
-# ── 公开接口 ──────────────────────────────────────────────────────────────────
+# ── Public interface ──────────────────────────────────────────────────────────
 
 def harvest(
     repo_url: str,
@@ -370,83 +385,83 @@ def harvest(
     max_scan: int = 300,
 ) -> list[dict]:
     """
-    克隆/更新仓库，返回 ubuntu_ver..upstream_ver 范围内
-    通过敏感词过滤的 commit 列表。
+    Clone/update the repository and return the list of commits in the range
+    ubuntu_ver..upstream_ver that pass the security-signal filter.
 
-    每个元素结构：
+    Each element has the structure:
     {
         "sha":        "abcdef1234567890...",
         "short_sha":  "abcdef12",
         "message":    "fix: prevent integer overflow in parse_header",
         "author":     "Alice <alice@example.com>",
         "date":       "2024-03-15",
-        "diff":       "<unified diff, 已截断>",
+        "diff":       "<unified diff, truncated>",
         "signals":    ["overflow", "fix"],
-        "_start_ref": "v0.21.0",   # 实际使用的起始 ref
-        "_end_ref":   "v0.24.2",   # 实际使用的终止 ref
+        "_start_ref": "v0.21.0",   # actual start ref used
+        "_end_ref":   "v0.24.2",   # actual end ref used
     }
     """
-    # ── URL 规范化：剥离 /tree/ 或 /blob/ 子路径 ────────────────────────────────
+    # ── URL normalization: strip /tree/ or /blob/ sub-paths ──────────────────
     clean_url, target_subdir = _normalize_repo_url(repo_url)
 
     local = _local_dir(clean_url)
     try:
         repo = _clone_or_update(clean_url, local)
     except git.GitCommandError as e:
-        log.error("[DiffHarvester] git 操作失败: %s", e)
+        log.error("[DiffHarvester] git operation failed: %s", e)
         return []
 
-    # ── Start Tag（Ubuntu 版本）────────────────────────────────────────────────
+    # ── Start Tag (Ubuntu version) ───────────────────────────────────────────
     start_tag = _find_tag_fuzzy(repo, ubuntu_ver, label="Start")
     if not start_tag:
         log.warning(
-            "[DiffHarvester] 无法为 Ubuntu 版本 '%s' 找到任何 tag，放弃扫描 %s",
+            "[DiffHarvester] No tag found for Ubuntu version '%s', aborting scan of %s",
             ubuntu_ver, repo_url,
         )
-        return []   # start 找不到 → 无法定义扫描起点，只能放弃
+        return []   # no start tag → scan range undefined, must abort
 
     start_commit = start_tag.commit
 
-    # ── End Tag（上游版本，失败则兜底用 HEAD）─────────────────────────────────
+    # ── End Tag (upstream version; fall back to HEAD on failure) ─────────────
     end_tag = _find_tag_fuzzy(repo, upstream_ver, label="End")
     if end_tag:
         end_commit = end_tag.commit
         end_ref    = end_tag.name
     else:
         log.warning(
-            "[DiffHarvester] 找不到上游版本 '%s' 的 tag，兜底使用默认主分支最新 commit",
+            "[DiffHarvester] No tag found for upstream version '%s', falling back to default branch tip",
             upstream_ver,
         )
         end_commit = _default_branch_tip(repo)
         if not end_commit:
-            log.error("[DiffHarvester] 无法获取仓库默认分支最新 commit，放弃")
+            log.error("[DiffHarvester] Could not obtain default branch tip, aborting")
             return []
         end_ref = f"HEAD({end_commit.hexsha[:8]})"
 
     log.info(
-        "[DiffHarvester] 扫描范围: %s(%s)..%s(%s)",
+        "[DiffHarvester] Scan range: %s(%s)..%s(%s)",
         start_tag.name, start_commit.hexsha[:8],
         end_ref,        end_commit.hexsha[:8],
     )
 
-    # ── 原生 git log 提取 SHA 列表（绕过 GitPython Annotated Tag 缺陷）─────────
-    # 使用 tag 名称（而非 hexsha）让 git 二进制正确解引用 Annotated Tag
+    # ── Native git rev-list to extract SHA list (works around GitPython annotated-tag bug) ──
+    # Use tag names (not hexsha) so git correctly dereferences annotated tags
     log_range = f"{start_tag.name}..{end_tag.name if end_tag else end_commit.hexsha}"
     log_args  = [log_range, "--no-merges"]
     if target_subdir:
         log_args += ["--", target_subdir]
-        log.info("[DiffHarvester] 限定扫描子目录: %s", target_subdir)
+        log.info("[DiffHarvester] Restricting scan to subdirectory: %s", target_subdir)
     try:
         raw_shas = [s for s in repo.git.rev_list(*log_args).splitlines() if s.strip()]
     except git.GitCommandError as e:
-        log.error("[DiffHarvester] git rev-list 失败: %s", e)
+        log.error("[DiffHarvester] git rev-list failed: %s", e)
         return []
 
     raw_shas = raw_shas[:max_scan]
-    log.info("[DiffHarvester] 找到 %d 个 commits 等待扫描", len(raw_shas))
-    print(f"[DiffHarvester] 找到 {len(raw_shas)} 个 commits 等待扫描")
+    log.info("[DiffHarvester] Found %d commits pending scan", len(raw_shas))
+    print(f"[DiffHarvester] Found {len(raw_shas)} commits pending scan")
 
-    # ── 多维度启发式过滤 ───────────────────────────────────────────────────────
+    # ── Multi-dimensional heuristic filter ───────────────────────────────────
     kept           = []
     n_blacklisted  = 0
     n_size_skipped = 0
@@ -458,8 +473,8 @@ def harvest(
         try:
             sha8 = sha[:8]
 
-            # 原生 git show：一次调用同时获取 author / date / message / patch
-            # 格式: 第1行=author, 第2行=date, 第3行起=commit body, 之后=diff
+            # Native git show: get author / date / message / patch in one call
+            # Format: line 1 = author, line 2 = date, line 3+ = commit body, then diff
             raw_show = repo.git.show(
                 sha,
                 "--format=%an <%ae>\n%cd\n%B",
@@ -467,7 +482,7 @@ def harvest(
                 "--date=short",
             )
 
-            # 分离 header（author+date+msg）和 diff 部分
+            # Split header (author+date+msg) from diff
             diff_pos = raw_show.find("\ndiff --git ")
             if diff_pos == -1:
                 header    = raw_show
@@ -482,23 +497,23 @@ def harvest(
             msg        = "\n".join(header_lines[2:]).strip() if len(header_lines) > 2 else ""
             first_line = msg.splitlines()[0][:80] if msg else ""
 
-            # ── Step 1: Message 黑名单（一票否决）────────────────────────────────
+            # ── Step 1: Message blacklist (disqualifies outright) ─────────────
             if _MSG_BLACKLIST_RE.search(msg):
                 n_blacklisted += 1
-                log.debug("[DiffHarvester] ✗ 黑名单  [%s] %s", sha8, first_line)
+                log.debug("[DiffHarvester] x blacklist  [%s] %s", sha8, first_line)
                 continue
 
-            # ── Step 2: Message 白名单扫描 ────────────────────────────────────────
+            # ── Step 2: Message whitelist scan ────────────────────────────────
             msg_hits = list({m.group(1).lower()
                              for m in _MSG_WHITELIST_RE.finditer(msg)})
 
-            # ── Step 3: 过滤 Diff（只保留代码文件和指定子目录）────────────────────
+            # ── Step 3: Filter diff (keep only code files and target subdir) ──
             diff = _filter_raw_diff(raw_patch, subdir=target_subdir)
             if not diff:
-                log.debug("[DiffHarvester] ✗ 无代码diff [%s] %s", sha8, first_line)
+                log.debug("[DiffHarvester] x no code diff [%s] %s", sha8, first_line)
                 continue
 
-            # ── Step 4: 体积熔断（+/- 行数超过阈值 → 视为 Feature 合并，跳过）────
+            # ── Step 4: Volume circuit-breaker (+/- lines > threshold → feature merge, skip) ──
             diff_lines = sum(
                 1 for line in diff.splitlines()
                 if line.startswith(("+", "-"))
@@ -507,23 +522,23 @@ def harvest(
             if diff_lines > _MAX_DIFF_LINES:
                 n_size_skipped += 1
                 log.info(
-                    "[DiffHarvester] ✗ 体积熔断 [%s] %d 行变动 > %d 阈值  %s",
+                    "[DiffHarvester] x size-breaker [%s] %d lines > %d threshold  %s",
                     sha8, diff_lines, _MAX_DIFF_LINES, first_line,
                 )
                 continue
 
-            # ── Step 5: 决策 ─────────────────────────────────────────────────────
+            # ── Step 5: Decision ──────────────────────────────────────────────
             if msg_hits:
-                # Message 层命中白名单 → 直接收录
+                # Message whitelist hit → accept immediately
                 selection_reason = f"msg:{'+'.join(sorted(msg_hits))}"
                 signals          = msg_hits
                 n_msg_hit       += 1
                 log.info(
-                    "[DiffHarvester] ✓ MSG命中  [%s] signals=%s  %s",
+                    "[DiffHarvester] + MSG hit  [%s] signals=%s  %s",
                     sha8, signals, first_line,
                 )
             else:
-                # Message 无白名单命中 → 扫描 Diff Payload 代码特征
+                # No message whitelist hit → scan diff payload for code signals
                 code_hits = list({
                     m.group(1)
                     for m in _DIFF_SIGNAL_RE.finditer(diff)
@@ -532,14 +547,14 @@ def harvest(
                 if not code_hits:
                     n_no_signal += 1
                     log.debug(
-                        "[DiffHarvester] ✗ 无信号   [%s] %s", sha8, first_line,
+                        "[DiffHarvester] x no signal   [%s] %s", sha8, first_line,
                     )
                     continue
                 selection_reason = f"code:{'+'.join(sorted(set(code_hits)))}"
                 signals          = [s.strip("+-. ") for s in code_hits[:6]]
                 n_code_hit      += 1
                 log.info(
-                    "[DiffHarvester] ✓ CODE命中 [%s] patterns=%s  %s",
+                    "[DiffHarvester] + CODE hit [%s] patterns=%s  %s",
                     sha8, code_hits[:4], first_line,
                 )
 
@@ -558,12 +573,12 @@ def harvest(
             })
 
         except Exception as e:
-            log.warning("[DiffHarvester] 跳过坏损 commit %s: %s", sha[:8], e)
+            log.warning("[DiffHarvester] Skipping corrupt commit %s: %s", sha[:8], e)
             continue
 
     log.info(
-        "[DiffHarvester] 扫描 %d commits → 保留 %d  "
-        "（黑名单=%d 体积熔断=%d msg命中=%d code命中=%d 无信号=%d）",
+        "[DiffHarvester] Scanned %d commits → kept %d  "
+        "(blacklisted=%d size_skipped=%d msg_hit=%d code_hit=%d no_signal=%d)",
         len(raw_shas), len(kept),
         n_blacklisted, n_size_skipped, n_msg_hit, n_code_hit, n_no_signal,
     )
@@ -571,22 +586,22 @@ def harvest(
 
 
 def summarise(commits: list[dict]) -> str:
-    """供 Agent Observation 打印的简洁摘要，包含每个 commit 的选中原因。"""
+    """Concise summary for Agent Observation output, including selection reason per commit."""
     if not commits:
-        return "未找到含敏感词的 commit。"
-    lines = [f"发现 {len(commits)} 个安全相关 commit："]
+        return "No commits with security signals found."
+    lines = [f"Found {len(commits)} security-relevant commits:"]
     for c in commits[:cfg.MAX_COMMITS_PER_AUDIT]:
         first_line = c["message"].splitlines()[0][:72]
         reason     = c.get("selection_reason", "?")
         diff_lines = c.get("diff_lines", "?")
         lines.append(
-            f"  [{c['short_sha']}] {c['date']}  +/-{diff_lines}行"
+            f"  [{c['short_sha']}] {c['date']}  +/-{diff_lines} lines"
             f"  [{reason}]  {first_line}"
         )
     if len(commits) > cfg.MAX_COMMITS_PER_AUDIT:
-        lines.append(f"  ... 还有 {len(commits) - cfg.MAX_COMMITS_PER_AUDIT} 个未显示")
+        lines.append(f"  ... {len(commits) - cfg.MAX_COMMITS_PER_AUDIT} more not shown")
     if commits:
         lines.append(
-            f"\n扫描范围: {commits[0].get('_start_ref','')} .. {commits[0].get('_end_ref','')}"
+            f"\nScan range: {commits[0].get('_start_ref','')} .. {commits[0].get('_end_ref','')}"
         )
     return "\n".join(lines)
