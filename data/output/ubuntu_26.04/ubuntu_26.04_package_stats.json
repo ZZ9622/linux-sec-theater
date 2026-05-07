@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-05-07T08:34:27.216454",
+  "ubuntu_version": "26.04 (Resolute)",
+  "main": {
+    "count": 6486,
+    "type": "Canonical maintained"
+  },
+  "universe": {
+    "count": 66733,
+    "type": "Community maintained (ESM scope)"
+  },
+  "total": 73219
+}
