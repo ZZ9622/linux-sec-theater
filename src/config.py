@@ -66,3 +66,9 @@ ZAI_AUDIT_MODEL  = "glm-5.1"
 
 MAX_COMMITS_PER_AUDIT = 5
 MAX_DIFF_CHARS = 28000
+
+# ── Phase 2 Step B: Dynamic Crash Reproduction ────────────────────────────────
+STEP_B_ENABLED       = True
+STEP_B_TIMEOUT_BUILD = 300   # seconds — cargo build is slow on first run (cold cache)
+STEP_B_TIMEOUT_RUN   = 60    # seconds — crash should surface quickly
+STEP_B_WORKTREE_DIR  = WORKSPACE_DIR / "crash_worktrees"

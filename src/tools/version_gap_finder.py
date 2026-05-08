@@ -35,6 +35,40 @@ _CRATES_HEADERS = {
 _TIMEOUT = 12
 
 
+# ── Binary package → Ubuntu source package name mapping ──────────────────────
+# Launchpad getPublishedSources uses SOURCE package names.
+# Binary packages that differ from their source name must be listed here.
+KNOWN_SOURCE_PKGS: dict[str, str] = {
+    "libssl3t64":       "openssl",
+    "libssl3":          "openssl",
+    "libssl-dev":       "openssl",
+    "libcurl4":         "curl",
+    "libcurl4-openssl-dev": "curl",
+    "zlib1g":           "zlib",
+    "zlib1g-dev":       "zlib",
+    "libexpat1":        "expat",
+    "libexpat1-dev":    "expat",
+    "libsqlite3-0":     "sqlite3",
+    "libsqlite3-dev":   "sqlite3",
+    "libjpeg-turbo8":   "libjpeg-turbo",
+    "libjpeg-turbo8-dev": "libjpeg-turbo",
+    "libpng16-16":      "libpng",
+    "libpng-dev":       "libpng",
+    "libwebp7":         "libwebp",
+    "libwebp-dev":      "libwebp",
+    "libglib2.0-0":     "glib2.0",
+    "libglib2.0-dev":   "glib2.0",
+    "libssh2-1":        "libssh2",
+    "libssh2-1-dev":    "libssh2",
+    "libnghttp2-14":    "nghttp2",
+    "libnghttp2-dev":   "nghttp2",
+    "libpcre2-8-0":     "pcre2",
+    "libpcre2-dev":     "pcre2",
+    "libxml2-dev":      "libxml2",
+    "libxml2-utils":    "libxml2",
+}
+
+
 # ── Hard-coded upstream repo mapping ─────────────────────────────────────────
 # Handles classic C/C++ packages whose upstream repo cannot be inferred from
 # the package name alone.
@@ -117,7 +151,9 @@ KNOWN_UPSTREAM_REPOS: dict[str, str] = {
     "libjpeg-turbo": "https://github.com/libjpeg-turbo/libjpeg-turbo",
     "libpng":        "https://github.com/pnggroup/libpng",
     "nghttp2":       "https://github.com/nghttp2/nghttp2",
-    "librust-bitstream-io-dev":                   "https://github.com/tuffy/bitstream-io"
+    "librust-bitstream-io-dev":                   "https://github.com/tuffy/bitstream-io",
+    "libssl3t64": "https://github.com/openssl/openssl",
+    "libtiff6": "https://github.com/libsdl-org/libtiff"
 }
 
 
@@ -272,7 +308,14 @@ def _github_latest_tag(repo_url: str) -> str:
         r = requests.get(url, headers=headers, timeout=_TIMEOUT)
         r.raise_for_status()
         for tag in r.json():
-            name = tag.get("name", "").lstrip("v").lstrip("V")
+            name = tag.get("name", "")
+            # Normalize: strip leading package-name prefix (e.g. "openssl-3.4.1" → "3.4.1",
+            # "OpenSSL_1_1_1w" → "1.1.1w") then strip leading v/V
+            name = re.sub(r"^[A-Za-z][A-Za-z0-9]*[-_]", "", name)
+            name = name.lstrip("vV")
+            # Underscores used as dots in legacy tags (e.g. "1_1_1w" → "1.1.1w")
+            if "_" in name and "." not in name:
+                name = name.replace("_", ".")
             # Skip pre-release tags (rc/alpha/beta/dev)
             if re.search(r"(rc|alpha|beta|dev|pre)", name, re.IGNORECASE):
                 continue
@@ -286,9 +329,10 @@ def _github_latest_tag(repo_url: str) -> str:
 # ── Launchpad online lookup (fallback) ───────────────────────────────────────
 
 def _launchpad_version(pkg: str) -> Optional[str]:
+    source_name = KNOWN_SOURCE_PKGS.get(pkg, pkg)
     url = (
         "https://api.launchpad.net/1.0/ubuntu/+archive/primary"
-        f"?ws.op=getPublishedSources&source_name={pkg}"
+        f"?ws.op=getPublishedSources&source_name={source_name}"
         f"&distro_series={cfg.UBUNTU_SERIES_LP}&order_by_date=true"
     )
     try:
@@ -397,11 +441,12 @@ def find_gap(pkg_name: str) -> dict:
         result["gap"] = v_up > v_ub
 
     # ⑦ Fail-safe: mark error on missing critical info; prevent Fail-Open returning gap: false
-    if not result["repo_url"] or not result["upstream_version"]:
+    if not result["repo_url"] or not result["upstream_version"] or not result["ubuntu_version"]:
         result["error"] = (
             f"Tool_Error: Cannot resolve upstream GitHub repository or tags "
             f"for package '{pkg_name}'. "
             f"(repo_url={result['repo_url']!r}, "
+            f"ubuntu_version={result['ubuntu_version']!r}, "
             f"upstream_version={result['upstream_version']!r})"
         )
         log.warning("[VersionGapFinder] %s resolution failed → %s", pkg_name, result["error"])

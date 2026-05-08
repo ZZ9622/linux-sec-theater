@@ -605,3 +605,108 @@ def summarise(commits: list[dict]) -> str:
             f"\nScan range: {commits[0].get('_start_ref','')} .. {commits[0].get('_end_ref','')}"
         )
     return "\n".join(lines)
+
+
+# ── Phase 1: GLM Semantic Filter ─────────────────────────────────────────────
+
+_CLASSIFY_SYSTEM = (
+    "You are a security-focused code reviewer. "
+    "Classify git commits as security fixes or not. "
+    "Respond ONLY with a single valid JSON object — no markdown, no prose."
+)
+
+_CLASSIFY_TEMPLATE = """\
+Analyze this git commit and determine whether it fixes a security vulnerability.
+
+Look specifically for these indicators (paper Phase 1 criteria):
+  • Bounds checking added or tightened
+  • Pointer / null validation inserted
+  • State machine corrections preventing invalid transitions
+  • Integer overflow / underflow guards
+  • Memory safety fixes (use-after-free, double-free, out-of-bounds)
+  • Input validation for externally-supplied data
+
+Commit message:
+{message}
+
+Code diff (key lines):
+{diff}
+
+Respond ONLY with this JSON (no extra fields, no markdown):
+{{
+  "is_security_fix": true,
+  "confidence": "high",
+  "fix_type": "bounds_check|pointer_validation|state_machine|integer_overflow|memory_safety|input_validation|none|other",
+  "brief_reason": "one sentence"
+}}"""
+
+
+def glm_filter(commits: list[dict], client: object) -> list[dict]:
+    """
+    Phase 1 — GLM Semantic Filter.
+
+    Second-pass filter applied after the regex heuristics in harvest().
+    Uses GLM-5 to classify each candidate commit as a genuine security fix
+    or a non-security change.
+
+    Retention policy:
+      • GLM says is_security_fix=True (any confidence)  → KEEP
+      • GLM says is_security_fix=False, confidence=low  → KEEP (uncertain)
+      • GLM says is_security_fix=False, confidence≠low  → DROP
+      • GLM call or parse failure                       → KEEP (fail-safe)
+
+    Each kept commit receives a ``glm_classification`` dict with at least:
+      {"is_security_fix": bool, "confidence": str, "fix_type": str,
+       "brief_reason": str, "kept": bool}
+    """
+    import json as _json
+
+    kept: list[dict] = []
+
+    for commit in commits:
+        sha8   = commit.get("short_sha", commit.get("sha", "")[:8])
+        msg    = commit.get("message", "")[:400]
+        diff   = commit.get("diff", "")[:1800]
+        prompt = _CLASSIFY_TEMPLATE.format(message=msg, diff=diff)
+
+        cls: dict = {}
+        try:
+            resp = client.chat.completions.create(  # type: ignore[attr-defined]
+                model           = cfg.ZAI_MODEL,
+                temperature     = 0.0,
+                response_format = {"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": _CLASSIFY_SYSTEM},
+                    {"role": "user",   "content": prompt},
+                ],
+            )
+            raw = resp.choices[0].message.content or "{}"
+            cls = _json.loads(raw.strip())
+        except Exception as exc:
+            log.warning("[GLMFilter] SHA=%s classify failed: %s — keeping commit", sha8, exc)
+            commit["glm_classification"] = {"error": str(exc), "kept": True}
+            kept.append(commit)
+            continue
+
+        is_fix   = bool(cls.get("is_security_fix", True))
+        conf     = str(cls.get("confidence", "low"))
+        fix_type = cls.get("fix_type", "other")
+        reason   = cls.get("brief_reason", "")
+
+        keep = is_fix or conf == "low"
+        cls["kept"] = keep
+        commit["glm_classification"] = cls
+
+        if is_fix:
+            log.info("[GLMFilter] KEEP  SHA=%s  fix_type=%-22s  conf=%-6s  %s",
+                     sha8, fix_type, conf, reason[:60])
+            kept.append(commit)
+        elif conf == "low":
+            log.info("[GLMFilter] KEEP? SHA=%s  uncertain (conf=low)  %s", sha8, reason[:60])
+            kept.append(commit)
+        else:
+            log.info("[GLMFilter] DROP  SHA=%s  conf=%-6s  %s", sha8, conf, reason[:60])
+
+    log.info("[GLMFilter] %d / %d commits retained after GLM semantic filter",
+             len(kept), len(commits))
+    return kept

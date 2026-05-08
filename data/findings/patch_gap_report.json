@@ -1,0 +1,105 @@
+[
+  {
+    "package": "libxml2-dev",
+    "ubuntu_2404_version": "2.9.14+dfsg-1.3ubuntu3",
+    "ubuntu_2604_version": "2.15.2+dfsg-0.1",
+    "commit_sha": "4982ee83f91ed598de793b280c8990646726c440",
+    "commit_message": "catalog: fix stack overflow from self-referencing SGML CATALOG entries",
+    "vuln_confirmed": true,
+    "severity": "HIGH",
+    "vulnerability_type": "Stack overflow via uncontrolled recursion from self-referencing SGML CATALOG entries",
+    "poc_sketch": "Create an SGML catalog file containing a CATALOG entry pointing to itself (e.g., 'CATALOG ./self.cat' where the file is named self.cat). When libxml2 parses this catalog via xmlLoadSGMLSuperCatalog or xmlExpandCatalog, it recursively processes the same file indefinitely, exhausting the stack and causing a crash (denial of service). Remote trigger possible if an application loads SGML catalogs from untrusted sources.",
+    "backport_difficulty": "easy",
+    "backport_notes": "The patch is small and localized (~10 lines changed in catalog.c around the CATALOG entry processing path). It introduces a hash-table deduplication check using existing internal APIs (xmlNewCatalogEntry, xmlHashAddEntry, xmlFreeCatalogEntry) that all exist in 2.9.14. Line offsets will likely differ due to version gap (2.9.14 vs 2.15.2), requiring manual context matching, but the logic is self-contained and straightforward to adapt.",
+    "stage1_vuln_class": "memory_corruption",
+    "stage1_confidence": "high",
+    "stage1_affected_funcs": [
+      "xmlParseSGMLCatalog"
+    ],
+    "_cot_rationale": "1. The 24.04 version (2.9.14) contains the SGML_CATA_CATALOG type handling at line 2384-2385, which sets the type but the downstream code (not shown but implied) directly calls xmlExpandCatalog without checking if the catalog has already been visited. 2. The upstream fix (present only in 26.04's 2.15.2) adds a hash-table check before recursive expansion: it first adds an entry to catal->sgml hash and only calls xmlExpandCatalog if the add succeeded (i.e., the filename wasn't already present). This breaks the cycle for self-referencing catalogs. 3. Since 24.04 lacks this guard, an attacker-controlled SGML catalog can reference itself, causing infinite recursion xmlExpandCatalog→xmlParseSGMLCatalog→xmlExpandCatalog until stack exhaustion. 4. This is a HIGH severity issue because it enables reliable denial-of-service via untrusted catalog files, and stack overflow corruption could theoretically be leveraged for code execution. 5. Backport is easy: the patch touches only one code block, uses existing internal catalog/hash APIs available in 2.9.14, and requires only offset adjustment.",
+    "_backend": "zai/glm-5.1"
+  },
+  {
+    "package": "libxml2-dev",
+    "ubuntu_2404_version": "2.9.14+dfsg-1.3ubuntu3",
+    "ubuntu_2604_version": "2.15.2+dfsg-0.1",
+    "commit_sha": "f0e757a2a4e9e4da6ad522d7a389b7a06db8e9d0",
+    "commit_message": "uri: fix signed integer overflow in xmlBuildRelativeURISafe",
+    "vuln_confirmed": true,
+    "severity": "HIGH",
+    "vulnerability_type": "Signed integer overflow in xmlBuildRelativeURISafe leading to heap buffer overflow",
+    "poc_sketch": "Attacker crafts XML with extremely long relative URI paths causing integer overflow in len + 3 * nbslash calculation, resulting in undersized heap allocation followed by out-of-bounds write when constructing relative URI with '../' sequences",
+    "backport_difficulty": "easy",
+    "backport_notes": "Patch involves simple type changes (int to size_t) for 4 variables and adding one overflow check. Function structure is stable across versions. Minor context adjustments may be needed if surrounding code differs slightly in v2.9.14.",
+    "stage1_vuln_class": "memory_corruption",
+    "stage1_confidence": "high",
+    "stage1_affected_funcs": [
+      "xmlBuildRelativeURISafe"
+    ],
+    "_cot_rationale": "Ubuntu 24.04 ships libxml2 v2.9.14 which predates fix commit f0e757a2. The vulnerable xmlBuildRelativeURISafe function uses signed int for len, nbslash, ix, and pos variables. When processing extremely long URIs, the calculation 'len + 3 * nbslash' can overflow a signed int, causing xmlMalloc to allocate a much smaller buffer than needed. Subsequent string operations (memcpy/strcpy of '../' patterns and remaining URI) write beyond buffer bounds. The upstream fix is surgical: type changes to size_t prevent negative values, and explicit SIZE_MAX check prevents unsigned wraparound. Backport is straightforward as the changes are isolated to variable declarations and one conditional check.",
+    "_backend": "zai/glm-5.1"
+  },
+  {
+    "package": "libxml2-dev",
+    "ubuntu_2404_version": "2.9.14+dfsg-1.3ubuntu3",
+    "ubuntu_2604_version": "2.15.2+dfsg-0.1",
+    "commit_sha": "df2ba65f661addfba50bdb7f280d594781249dfc",
+    "commit_message": "use duplicating variant in relaxng to mitigate UAF",
+    "vuln_confirmed": true,
+    "severity": "MEDIUM",
+    "vulnerability_type": "Use-After-Free in RelaxNG validation error reporting path",
+    "poc_sketch": "Craft an XML document with a RelaxNG schema that triggers XML_RELAXNG_ERR_LISTEXTRA during value validation, where ctxt->state->value references memory freed during error callback processing, causing UAF when the error handler accesses the stale pointer",
+    "backport_difficulty": "trivial",
+    "backport_notes": "Single-line macro change from VALID_ERR2 to VALID_ERR2P (duplicating variant). Must verify VALID_ERR2P macro exists in 2.9.14 codebase; if not present, the macro definition from the duplicating variant would need to be added as well.",
+    "stage1_vuln_class": "memory_corruption",
+    "stage1_confidence": "high",
+    "stage1_affected_funcs": [
+      "xmlRelaxNGValidateValue"
+    ],
+    "_cot_rationale": "The upstream fix (df2ba65f) specifically addresses a UAF by switching from VALID_ERR2 to its duplicating variant VALID_ERR2P in the relaxng.c validation error path. Ubuntu 24.04 ships v2.9.14 which predates this fix (present in 26.04's v2.15.2). The vulnerable code path exists: when XML_RELAXNG_ERR_LISTEXTRA is raised, VALID_ERR2 stores ctxt->state->value directly, which can become dangling if the value is freed during error processing. The patch is a minimal one-line change, making backport straightforward. Severity is medium because triggering requires RelaxNG schema validation with specifically crafted input hitting this particular error condition.",
+    "_backend": "zai/glm-5.1"
+  },
+  {
+    "package": "libxml2-dev",
+    "ubuntu_2404_version": "2.9.14+dfsg-1.3ubuntu3",
+    "ubuntu_2604_version": "2.15.2+dfsg-0.1",
+    "commit_sha": "66c52b3ac6c32ab112ec2a3bf41e6c30948be113",
+    "commit_message": "Add RelaxNG include limit",
+    "vuln_confirmed": true,
+    "severity": "HIGH",
+    "vulnerability_type": "Unbounded RelaxNG include recursion leading to stack overflow/memory corruption",
+    "poc_sketch": "Create deeply nested RelaxNG schema files that recursively include each other (e.g., schema1.rng includes schema2.rng, which includes schema3.rng, etc. for thousands of levels). Feed the root schema to any application that parses RelaxNG schemas via libxml2, causing stack exhaustion and crash or potential code execution.",
+    "backport_difficulty": "moderate",
+    "backport_notes": "Patch requires: (1) adding 'incLimit' field to _xmlRelaxNGParserCtxt struct, (2) adding new public API function xmlRelaxParserSetIncLImit to relaxng.h, (3) modifying xmlRelaxNGIncludePush to enforce the limit, (4) updating xmlRelaxNGLoadInclude to check return value, (5) adding env variable parsing in xmlRelaxNGParse. Code structure in 2.9.14 differs from 2.15.x so line offsets won't match. ABI compatibility should be preserved since the new struct field is appended and new function is an addition. Test changes in runtest.c are optional for security fix.",
+    "stage1_vuln_class": "memory_corruption",
+    "stage1_confidence": "high",
+    "stage1_affected_funcs": [
+      "xmlRelaxParserSetIncLImit",
+      "xmlRelaxNGParseInclude"
+    ],
+    "_cot_rationale": "1. Ubuntu 24.04 ships libxml2 2.9.14 which predates the fix commit. The xmlRelaxNGIncludePush function in 2.9.14 has no depth limit check - it only grows the incTab array dynamically without bounds. 2. The xmlRelaxNGLoadInclude function doesn't check the return value of xmlRelaxNGIncludePush (which returned 0 on error in old code anyway). 3. The _xmlRelaxNGParserCtxt structure lacks the incLimit field. 4. No environment variable parsing exists for RNG_INCLUDE_LIMIT. 5. The vulnerability is confirmed present. 6. Backport is moderate because while the logic is straightforward, the code has evolved between versions requiring manual adaptation of the changes to the 2.9.14 codebase, and care must be taken with the struct modification to maintain ABI compatibility. 7. Severity is HIGH because unbounded recursion in RelaxNG include processing can cause stack overflow leading to denial of service or potential memory corruption/code execution, though attack surface is limited to applications that parse untrusted RelaxNG schemas.",
+    "_backend": "zai/glm-5.1"
+  },
+  {
+    "package": "libxml2-dev",
+    "ubuntu_2404_version": "2.9.14+dfsg-1.3ubuntu3",
+    "ubuntu_2604_version": "2.15.2+dfsg-0.1",
+    "commit_sha": "c2d310649edd05260e38a636d4aa9346c04ffc30",
+    "commit_message": "writer: Add a few extra NULL checks to avoid memory leaks on corrupt writer path.",
+    "vuln_confirmed": true,
+    "severity": "MEDIUM",
+    "vulnerability_type": "NULL pointer dereference in xmlTextWriterStartElementNS/AttributeNS/OutputNSDecl due to missing nsstack NULL check",
+    "poc_sketch": "Create an xmlTextWriter with a corrupted/NULL nsstack field, then call xmlTextWriterStartElementNS or xmlTextWriterStartAttributeNS with a namespaceURI argument. The function dereferences writer->nsstack at xmlListPushFront/xmlListSearch without validation, causing a segfault/crash.",
+    "backport_difficulty": "trivial",
+    "backport_notes": "The patch adds simple NULL checks for writer->nsstack in three function entry points. The 24.04 code structure is identical - just adding '|| (writer->nsstack == NULL)' to existing guard clauses in xmlTextWriterStartElementNS and xmlTextWriterStartAttributeNS, and a new guard block in xmlTextWriterOutputNSDecl. No structural changes or dependencies.",
+    "stage1_vuln_class": "memory_corruption",
+    "stage1_confidence": "medium",
+    "stage1_affected_funcs": [
+      "xmlTextWriterStartElementNS",
+      "xmlTextWriterStartAttributeNS",
+      "xmlTextWriterOutputNSDecl"
+    ],
+    "_cot_rationale": "The Ubuntu 24.04 source at lines 1061 and 1837 shows the guards lack the '(writer->nsstack == NULL)' check present in the upstream fix. The nsstack is dereferenced at lines 1103 (xmlListPushFront), 1854 (xmlListSearch), and 1887 (xmlListPushFront) without NULL validation. The xmlTextWriterOutputNSDecl function is also affected per the patch. All three sites are reachable via namespace-related writer operations on a corrupted writer object. The patch is trivial to backport as it only adds conditional checks to existing if-statements and one new guard block.",
+    "_backend": "zai/glm-5.1"
+  }
+]
