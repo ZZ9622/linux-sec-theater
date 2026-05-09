@@ -44,6 +44,20 @@ KNOWN_SOURCE_PKGS: dict[str, str] = {
     "libssl-dev":       "openssl",
     "libcurl4":         "curl",
     "libcurl4-openssl-dev": "curl",
+    "libgnutls28-dev":  "gnutls28",
+    "libpoppler-dev":   "poppler",
+    "libopenjp2-7":     "openjpeg2",
+    "libonig5":         "oniguruma",
+    "freerdp3-dev":     "freerdp3",
+    "containerd":       "containerd",
+    "libpam0g-dev":     "pam",
+    "librados-dev":     "ceph",
+    "libucl1":          "ucl",
+    "libmupdf-dev":     "mupdf",
+    "opensc":           "opensc",
+    "libevent-dev":     "libevent",
+    "libmysqlclient-dev": "mysql-8.0",
+    "libicu-dev":       "icu",
     "zlib1g":           "zlib",
     "zlib1g-dev":       "zlib",
     "libexpat1":        "expat",
@@ -66,6 +80,7 @@ KNOWN_SOURCE_PKGS: dict[str, str] = {
     "libpcre2-dev":     "pcre2",
     "libxml2-dev":      "libxml2",
     "libxml2-utils":    "libxml2",
+    "libarchive-dev":   "libarchive",
 }
 
 
@@ -78,6 +93,49 @@ KNOWN_UPSTREAM_REPOS: dict[str, str] = {
     "libxml2":                    "https://github.com/GNOME/libxml2",
     "libxml2-dev":                "https://github.com/GNOME/libxml2",
     "libxml2-utils":              "https://github.com/GNOME/libxml2",
+    # libarchive
+    "libarchive":                 "https://github.com/libarchive/libarchive",
+    "libarchive-dev":             "https://github.com/libarchive/libarchive",
+    # gnutls
+    "gnutls28":                   "https://github.com/gnutls/gnutls",
+    "libgnutls28-dev":            "https://github.com/gnutls/gnutls",
+    # poppler
+    "poppler":                    "https://gitlab.freedesktop.org/poppler/poppler",
+    "libpoppler-dev":             "https://gitlab.freedesktop.org/poppler/poppler",
+    # openjpeg2
+    "openjpeg2":                  "https://github.com/uclouvain/openjpeg",
+    "libopenjp2-7":               "https://github.com/uclouvain/openjpeg",
+    # oniguruma
+    "oniguruma":                  "https://github.com/kkos/oniguruma",
+    "libonig5":                   "https://github.com/kkos/oniguruma",
+    # FreeRDP
+    "freerdp3":                   "https://github.com/FreeRDP/FreeRDP",
+    "freerdp3-dev":               "https://github.com/FreeRDP/FreeRDP",
+    # containerd
+    "containerd":                 "https://github.com/containerd/containerd",
+    # PAM
+    "pam":                        "https://github.com/linux-pam/linux-pam",
+    "libpam0g-dev":               "https://github.com/linux-pam/linux-pam",
+    # Ceph
+    "ceph":                       "https://github.com/ceph/ceph",
+    "librados-dev":               "https://github.com/ceph/ceph",
+    # libucl
+    "libucl":                     "https://github.com/vstakhov/libucl",
+    "libucl1":                    "https://github.com/vstakhov/libucl",
+    # MuPDF
+    "mupdf":                      "https://github.com/ArtifexSoftware/mupdf",
+    "libmupdf-dev":               "https://github.com/ArtifexSoftware/mupdf",
+    # OpenSC
+    "opensc":                     "https://github.com/OpenSC/OpenSC",
+    # libevent
+    "libevent":                   "https://github.com/libevent/libevent",
+    "libevent-dev":               "https://github.com/libevent/libevent",
+    # MySQL
+    "mysql-8.0":                  "https://github.com/mysql/mysql-server",
+    "libmysqlclient-dev":         "https://github.com/mysql/mysql-server",
+    # ICU
+    "icu":                        "https://github.com/unicode-org/icu",
+    "libicu-dev":                 "https://github.com/unicode-org/icu",
     # FFmpeg
     "ffmpeg":                     "https://github.com/FFmpeg/FFmpeg",
     "libavcodec-dev":             "https://github.com/FFmpeg/FFmpeg",
@@ -147,7 +205,6 @@ KNOWN_UPSTREAM_REPOS: dict[str, str] = {
     "librust-bitstream-io-dev":                   "https://github.com/tuffy/bitstream-io",
     "librust-os-info-dev":                        "https://github.com/stanislav-tkach/os_info",
     "sqlite3":     "https://github.com/sqlite/sqlite",
-    "libarchive":  "https://github.com/libarchive/libarchive",
     "libjpeg-turbo": "https://github.com/libjpeg-turbo/libjpeg-turbo",
     "libpng":        "https://github.com/pnggroup/libpng",
     "nghttp2":       "https://github.com/nghttp2/nghttp2",
@@ -291,38 +348,64 @@ def resolve_repo_url(pkg: str) -> Optional[str]:
 
 # ── GitHub tags latest version lookup ────────────────────────────────────────
 
-def _github_latest_tag(repo_url: str) -> str:
+def _latest_tag(repo_url: str) -> str:
     """
-    Extract the latest semantic version from the GitHub Tags API.
-    Only supports github.com URLs; returns empty string for others.
+    Extract the latest semantic version from a GitHub or GitLab tags API.
+    Returns empty string for unsupported hosts.
     """
-    m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url)
-    if not m:
-        return ""
-    owner, repo = m.group(1), m.group(2)
-    url = cfg.GITHUB_TAGS_API.format(owner=owner, repo=repo)
     headers: dict[str, str] = {"User-Agent": "linux-sec-theater/1.0 (security research)"}
-    if cfg.GITHUB_TOKEN:
-        headers["Authorization"] = f"token {cfg.GITHUB_TOKEN}"
-    try:
-        r = requests.get(url, headers=headers, timeout=_TIMEOUT)
-        r.raise_for_status()
-        for tag in r.json():
-            name = tag.get("name", "")
-            # Normalize: strip leading package-name prefix (e.g. "openssl-3.4.1" → "3.4.1",
-            # "OpenSSL_1_1_1w" → "1.1.1w") then strip leading v/V
-            name = re.sub(r"^[A-Za-z][A-Za-z0-9]*[-_]", "", name)
-            name = name.lstrip("vV")
-            # Underscores used as dots in legacy tags (e.g. "1_1_1w" → "1.1.1w")
-            if "_" in name and "." not in name:
-                name = name.replace("_", ".")
-            # Skip pre-release tags (rc/alpha/beta/dev)
-            if re.search(r"(rc|alpha|beta|dev|pre)", name, re.IGNORECASE):
-                continue
-            if _parse(name):
-                return name
-    except Exception as e:
-        log.warning("[VersionGapFinder] GitHub tags query failed %s/%s: %s", owner, repo, e)
+
+    def _normalize_tag_name(name: str) -> str:
+        name = re.sub(r"^[A-Za-z][A-Za-z0-9]*[-_]", "", name)
+        name = re.sub(r"^.*?(?=\d)", "", name)
+        name = name.lstrip("vV")
+        if "_" in name and "." not in name:
+            name = name.replace("_", ".")
+        return name
+
+    if "github.com" in repo_url:
+        m = re.match(r"https://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url)
+        if not m:
+            return ""
+        owner, repo = m.group(1), m.group(2)
+        url = cfg.GITHUB_TAGS_API.format(owner=owner, repo=repo)
+        if cfg.GITHUB_TOKEN:
+            headers["Authorization"] = f"token {cfg.GITHUB_TOKEN}"
+        try:
+            r = requests.get(url, headers=headers, timeout=_TIMEOUT)
+            r.raise_for_status()
+            for tag in r.json():
+                name = tag.get("name", "")
+                name = _normalize_tag_name(name)
+                if re.search(r"(rc|alpha|beta|dev|pre)", name, re.IGNORECASE):
+                    continue
+                if _parse(name):
+                    return name
+        except Exception as e:
+            log.warning("[VersionGapFinder] GitHub tags query failed %s/%s: %s", owner, repo, e)
+        return ""
+
+    if "gitlab" in repo_url:
+        m = re.match(r"https://([^/]+)/(.+?)(?:\.git)?/?$", repo_url)
+        if not m:
+            return ""
+        host, project_path = m.group(1), m.group(2)
+        from urllib.parse import quote
+        url = f"https://{host}/api/v4/projects/{quote(project_path, safe='')}/repository/tags?per_page=100"
+        try:
+            r = requests.get(url, headers=headers, timeout=_TIMEOUT)
+            r.raise_for_status()
+            for tag in r.json():
+                name = tag.get("name", "")
+                name = _normalize_tag_name(name)
+                if re.search(r"(rc|alpha|beta|dev|pre)", name, re.IGNORECASE):
+                    continue
+                if _parse(name):
+                    return name
+        except Exception as e:
+            log.warning("[VersionGapFinder] GitLab tags query failed %s: %s", repo_url, e)
+        return ""
+
     return ""
 
 
@@ -426,7 +509,7 @@ def find_gap(pkg_name: str) -> dict:
 
     # ⑤ If repo_url is known but upstream_version is still empty, fetch from GitHub Tags API
     if result["repo_url"] and not result["upstream_version"]:
-        tag_ver = _github_latest_tag(result["repo_url"])
+        tag_ver = _latest_tag(result["repo_url"])
         if tag_ver:
             result["upstream_version"] = tag_ver
             log.info(
