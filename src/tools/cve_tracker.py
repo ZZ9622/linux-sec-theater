@@ -18,7 +18,10 @@ check_ubuntu_patch_status(pkg_name, ver_2404_recorded, cve_ids)
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from typing import Optional
+
+from .version_gap_finder import resolve_source_package_name
 
 log = logging.getLogger(__name__)
 
@@ -94,16 +97,42 @@ def _nvd_search(keyword: str, pkg_name: str) -> list[dict]:
 
 def _ubuntu_cves_for_pkg(pkg_name: str) -> list[dict]:
     """Fetch CVE list from the Ubuntu security tracker for a given package."""
-    src = re.sub(r"-dev$|-devel$|-doc$|-dbg$|-bin$", "", pkg_name)
-    data = _get(_UBUNTU_CVES_URL, {"package": src, "limit": 200})
+    src = resolve_source_package_name(pkg_name)
+    data = _get(_UBUNTU_CVES_URL, {"package": src, "limit": 500})
     if data is None:
         return []
     return data if isinstance(data, list) else data.get("cves", [])
 
 
+def _ubuntu_cves_search_by_sha(short_sha: str) -> list[dict]:
+    """
+    Search the Ubuntu CVE tracker for CVEs that mention a commit SHA directly.
+
+    Query: https://ubuntu.com/security/cves.json?q={short_sha}&limit=50
+    Returns a list of CVE dicts that mention the SHA in their text.
+    """
+    if not short_sha:
+        return []
+    data = _get(_UBUNTU_CVES_URL, {"q": short_sha, "limit": 50})
+    if data is None:
+        return []
+    candidates = data if isinstance(data, list) else data.get("cves", [])
+    # Filter to only CVEs that actually contain the SHA somewhere in their text.
+    result = []
+    for entry in candidates:
+        blob = " ".join([
+            entry.get("id", ""),
+            entry.get("description", ""),
+            entry.get("references", ""),
+        ])
+        if _mention_check_strict(short_sha, blob):
+            result.append(entry)
+    return result
+
+
 def _launchpad_current_version(pkg_name: str) -> Optional[str]:
     """Return the most recent Noble source version, checking Security/Updates/Release pockets."""
-    src = re.sub(r"-dev$|-devel$|-doc$|-dbg$|-bin$", "", pkg_name)
+    src = resolve_source_package_name(pkg_name)
     for pocket in ("Security", "Updates", "Release"):
         data = _get(_LAUNCHPAD_ARCH, {
             "ws.op":         "getPublishedSources",
@@ -249,7 +278,7 @@ def get_ubuntu_component(pkg_name: str) -> str:
     The component_name field is authoritative; falls back to 'unknown' on failure.
     ESM coverage: main → esm-infra; universe → esm-apps (paid).
     """
-    src = re.sub(r"-dev$|-devel$|-doc$|-dbg$|-bin$", "", pkg_name)
+    src = resolve_source_package_name(pkg_name)
     for pocket in ("Security", "Updates", "Release"):
         data = _get(_LAUNCHPAD_ARCH, {
             "ws.op":         "getPublishedSources",
@@ -287,6 +316,83 @@ def _debian_cve_status_from_tracker(data: dict, cve_id: str) -> Optional[str]:
     return None
 
 
+def _query_debian_tracker_source_package(src_pkg: str) -> tuple[Optional[dict], bool, Optional[dict]]:
+    """
+    Query Debian security tracker source-package endpoint with explicit failure reasons.
+        Returns (data, attempted, error_reason).
+            - data: dict on success, {} when endpoint returns valid but empty payload, None on failure
+            - attempted: whether an HTTP request was attempted
+            - error_reason: dict with code/body_prefix on failure, else None
+    
+    Note: Debian tracker may not have a stable JSON API for source packages.
+    If it returns non-JSON (e.g., HTML), this is expected and we gracefully skip it.
+    """
+    if not _HAS_REQUESTS:
+        return None, False, {"code": "endpoint_unreachable"}
+
+    s = _session()
+    if s is None:
+        return None, False, {"code": "endpoint_unreachable"}
+
+    # Try JSON endpoint first; if it doesn't exist, the tracker will silently return non-JSON.
+    # This is expected behavior and we handle it gracefully.
+    url_candidates = [
+        f"https://security-tracker.debian.org/tracker/json/package/{src_pkg}",
+        f"https://security-tracker.debian.org/tracker/source-package/{src_pkg}",
+    ]
+
+    attempted = False
+    last_error = None
+
+    for url in url_candidates:
+        for i in range(2):
+            attempted = True
+            try:
+                r = s.get(url, timeout=15)
+                if r.status_code != 200:
+                    code = f"http_{r.status_code}"
+                    if 500 <= r.status_code < 600 and i < 1:
+                        continue
+                    last_error = {"code": code, "url": url, "body_prefix": (r.text or "")[:100]}
+                    break
+                
+                content_type = r.headers.get("Content-Type", "")
+                if "application/json" not in content_type.lower():
+                    # Not JSON — try next URL candidate
+                    last_error = {"code": "non_json_response", "url": url, "content_type": content_type}
+                    break
+                
+                try:
+                    data = r.json()
+                except Exception:
+                    last_error = {"code": "json_decode_error", "url": url, "body_prefix": (r.text or "")[:100]}
+                    break
+                
+                # Success
+                return (data if isinstance(data, dict) else {}), attempted, None
+            
+            except Exception as exc:
+                name = exc.__class__.__name__.lower()
+                msg = str(exc).lower()
+                is_timeout = "timeout" in name or "timed out" in msg
+                is_network = is_timeout or "connection" in name or "connection" in msg
+                if is_network and i < 1:
+                    continue
+                if is_timeout:
+                    last_error = {"code": "timeout", "url": url}
+                elif is_network:
+                    last_error = {"code": "endpoint_unreachable", "url": url}
+                else:
+                    last_error = {"code": "unknown_exception", "url": url, "detail": exc.__class__.__name__}
+                break
+
+    # All candidates failed or didn't return JSON
+    if last_error is None:
+        last_error = {"code": "all_endpoints_failed"}
+    
+    return None, attempted, last_error
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Public: CVE lookup
 # ══════════════════════════════════════════════════════════════════════════════
@@ -297,6 +403,8 @@ _EMPTY_CVE = {
     "cve_assignment_date":   None,
     "usn_published":         False,
     "usn_ids":               [],
+    "debian_cve_statuses":   {},
+    "_debian_query_attempted": False,
     "_cve_lookup_source":    "unavailable",
 }
 
@@ -327,7 +435,8 @@ def lookup_cve_for_commit(
     All fields are factual observations — no LLM involved.
     """
     if not _HAS_REQUESTS:
-        return {**_EMPTY_CVE, "_cve_lookup_source": "no_requests_lib"}
+        return {**_EMPTY_CVE, "_cve_lookup_source": "no_requests_lib",
+                "_api_timestamp": datetime.now(timezone.utc).isoformat()}
 
     short_sha = commit_sha[:12]
     found_cves: list[str] = []
@@ -335,8 +444,27 @@ def lookup_cve_for_commit(
     usn_ids:    list[str] = []
     sources:    list[str] = []
     debian_cve_statuses: dict[str, str] = {}
-    _deb_data_cache:  Optional[dict] = None  # reused by Debian tracker and status lookup
-    _deb_query_failed: bool           = False  # True when HTTP request to tracker failed
+    _deb_data_cache: Optional[dict] = None  # reused by Debian tracker and status lookup
+    _deb_query_attempted: bool = False
+    _deb_query_error: Optional[str] = None
+
+    # ── Step 0. Ubuntu CVE tracker — SHA-based direct search ─────────────────
+    # Search by commit SHA before the package-scoped query; catches CVEs that
+    # were assigned after initial ingestion and reference the commit directly.
+    for entry in _ubuntu_cves_search_by_sha(short_sha):
+        cve_id = entry.get("id", "")
+        if not cve_id:
+            continue
+        if cve_id not in found_cves:
+            found_cves.append(cve_id)
+            pub = entry.get("published", "")[:10]
+            if pub:
+                cve_dates.append(pub)
+            sources.append("ubuntu_tracker_sha")
+        for notice in entry.get("notices", []):
+            usn = notice.get("id", "")
+            if usn and usn not in usn_ids:
+                usn_ids.append(usn)
 
     # ── 1. Ubuntu CVE tracker ─────────────────────────────────────────────────
     for entry in _ubuntu_cves_for_pkg(pkg_name):
@@ -360,11 +488,31 @@ def lookup_cve_for_commit(
                 if usn and usn not in usn_ids:
                     usn_ids.append(usn)
 
-    # ── 2. NVD reverse reference-URL lookup ──────────────────────────────────
+    # ── 2. Debian security tracker ────────────────────────────────────────────
+    # Priority: Ubuntu tracker > Debian tracker > NVD (Ubuntu is already done above)
+    src_pkg  = resolve_source_package_name(pkg_name)
+    deb_data, _deb_query_attempted, _deb_query_error = _query_debian_tracker_source_package(src_pkg)
+    _deb_data_cache = deb_data if isinstance(deb_data, dict) else None
+    if _deb_query_error:
+        log.debug(
+            "[lookup_cve] Debian tracker query skipped for %s (src=%s): %s",
+            pkg_name, src_pkg, _deb_query_error.get("code", "unknown")
+        )
+    if _deb_data_cache:
+        deb_text = str(_deb_data_cache)
+        if _mention_check_strict(short_sha, deb_text):
+            for m in re.findall(r"CVE-\d{4}-\d+", deb_text):
+                if m not in found_cves:
+                    found_cves.append(m)
+                    sources.append("debian_tracker")
+
+    # ── 3. NVD reverse reference-URL lookup ──────────────────────────────────
     # Find CVEs whose references explicitly cite one of the candidate commit URLs.
     # Empty result is the ground-truth "silent fix" signal.
     # No keyword/package-name fallback — that approach contaminates results with
     # unrelated historical CVEs for the same package.
+    # No date-based filtering: searches the full current CVE database regardless
+    # of when the CVE was assigned relative to the commit.
     for cve in _nvd_search_by_ref_url(list(upstream_commit_urls)):
         cve_id = cve.get("id", "")
         if cve_id and cve_id not in found_cves:
@@ -373,21 +521,6 @@ def lookup_cve_for_commit(
             if pub:
                 cve_dates.append(pub)
             sources.append("nvd_ref_url")
-
-    # ── 3. Debian security tracker ────────────────────────────────────────────
-    src_pkg  = re.sub(r"-dev$|-devel$|-doc$|-dbg$|-bin$", "", pkg_name)
-    deb_data = _get(
-        f"https://security-tracker.debian.org/tracker/source-package/{src_pkg}"
-    )
-    _deb_query_failed = deb_data is None   # None = HTTP/parse error; {} = valid empty response
-    _deb_data_cache   = deb_data if isinstance(deb_data, dict) else None
-    if _deb_data_cache:
-        deb_text = str(_deb_data_cache)
-        if _mention_check_strict(short_sha, deb_text):
-            for m in re.findall(r"CVE-\d{4}-\d+", deb_text):
-                if m not in found_cves:
-                    found_cves.append(m)
-                    sources.append("debian_tracker")
 
     # ── 4. OSV.dev — commit-hash query (covers GitHub GHSA, OSS-Fuzz, Debian) ─
     for vuln in _osv_search_commit(commit_sha):
@@ -416,15 +549,21 @@ def lookup_cve_for_commit(
         time.sleep(_NVD_DELAY)
 
     earliest_date = min(cve_dates) if cve_dates else None
-    # debian_cve_statuses: null = queried OK but no matching data;
-    #                       {"_error":"query_failed"} = network/parse failure;
+    # debian_cve_statuses: {} = queried OK but no matching data;
+    #                       {"_error":"<reason>"} = network/http/parse failure;
     #                       {cve_id: "bookworm:resolved", ...} = real data found.
-    if _deb_query_failed:
-        deb_statuses_out = {"_error": "query_failed"}
+    if _deb_query_error:
+        deb_statuses_out = {
+            "_error": _deb_query_error.get("code", "unknown_exception")
+        }
+        if _deb_query_error.get("body_prefix"):
+            deb_statuses_out["_body_prefix"] = _deb_query_error.get("body_prefix")
+        if _deb_query_error.get("content_type"):
+            deb_statuses_out["_content_type"] = _deb_query_error.get("content_type")
     elif debian_cve_statuses:
         deb_statuses_out = debian_cve_statuses
     else:
-        deb_statuses_out = None
+        deb_statuses_out = {}
     return {
         "cve_assigned":          len(found_cves) > 0,
         "cve_ids":               found_cves,
@@ -433,7 +572,9 @@ def lookup_cve_for_commit(
         "usn_ids":               usn_ids,
         "usn_first_date":        usn_first_date,
         "debian_cve_statuses":   deb_statuses_out,
+        "_debian_query_attempted": _deb_query_attempted,
         "_cve_lookup_source":    "|".join(dict.fromkeys(sources)) or "no_match",
+        "_api_timestamp":        datetime.now(timezone.utc).isoformat(),
     }
 
 

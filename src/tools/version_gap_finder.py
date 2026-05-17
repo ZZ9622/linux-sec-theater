@@ -45,6 +45,8 @@ KNOWN_SOURCE_PKGS: dict[str, str] = {
     "libcurl4":         "curl",
     "libcurl4-openssl-dev": "curl",
     "libgnutls28-dev":  "gnutls28",
+    "libgnutls30":      "gnutls28",
+    "libgnutls30-dev":  "gnutls28",
     "libpoppler-dev":   "poppler",
     "libopenjp2-7":     "openjpeg2",
     "libonig5":         "oniguruma",
@@ -82,6 +84,14 @@ KNOWN_SOURCE_PKGS: dict[str, str] = {
     "libxml2-utils":    "libxml2",
     "libarchive-dev":   "libarchive",
 }
+
+
+def resolve_source_package_name(pkg_name: str) -> str:
+    """Return the canonical Ubuntu/Debian source package name for a binary package."""
+    if pkg_name in KNOWN_SOURCE_PKGS:
+        return KNOWN_SOURCE_PKGS[pkg_name]
+    stripped = re.sub(r"-dev$|-devel$|-doc$|-dbg$|-bin$", "", pkg_name)
+    return KNOWN_SOURCE_PKGS.get(stripped, stripped)
 
 
 # ── Hard-coded upstream repo mapping ─────────────────────────────────────────
@@ -210,7 +220,8 @@ KNOWN_UPSTREAM_REPOS: dict[str, str] = {
     "nghttp2":       "https://github.com/nghttp2/nghttp2",
     "librust-bitstream-io-dev":                   "https://github.com/tuffy/bitstream-io",
     "libssl3t64": "https://github.com/openssl/openssl",
-    "libtiff6": "https://github.com/libsdl-org/libtiff"
+    "libtiff6": "https://github.com/libsdl-org/libtiff",
+    "androguard": "https://github.com/androguard/androguard"
 }
 
 
@@ -449,8 +460,12 @@ def find_gap(pkg_name: str) -> dict:
     set to a "Tool_Error: ..." string; callers should pass this directly to the
     LLM rather than returning gap: false.
     """
+    pkg_raw = (pkg_name or "")
+    pkg_norm = pkg_raw.strip().lower()
+    source_norm = resolve_source_package_name(pkg_norm)
+
     result: dict = {
-        "package":          pkg_name,
+        "package":          pkg_raw,
         "ubuntu_version":   "",
         "upstream_version": "",
         "gap":              False,
@@ -460,17 +475,20 @@ def find_gap(pkg_name: str) -> dict:
     }
 
     # ① Check hard-coded mapping first (handles classic C/C++ packages)
-    if pkg_name in KNOWN_UPSTREAM_REPOS:
-        result["repo_url"] = KNOWN_UPSTREAM_REPOS[pkg_name]
+    for candidate in (pkg_norm, source_norm, pkg_raw.strip()):
+        if candidate in KNOWN_UPSTREAM_REPOS:
+            result["repo_url"] = KNOWN_UPSTREAM_REPOS[candidate]
+            break
+    if result["repo_url"]:
         result["source"]   = "known_map"
-        log.info("[VersionGapFinder] %s → known_map %s", pkg_name, result["repo_url"])
+        log.info("[VersionGapFinder] %s → known_map %s", pkg_raw, result["repo_url"])
 
     # ② Pre-computed fast path
     precomp: dict = {}
-    if pkg_name.startswith("librust-"):
-        precomp = _ligrust_cache().get(pkg_name, {})
-    elif pkg_name.startswith("golang-"):
-        precomp = _golang_cache().get(pkg_name, {})
+    if pkg_norm.startswith("librust-"):
+        precomp = _ligrust_cache().get(pkg_norm, {})
+    elif pkg_norm.startswith("golang-"):
+        precomp = _golang_cache().get(pkg_norm, {})
 
     if precomp:
         result["ubuntu_version"]   = _clean_ver(precomp.get("ubuntu_full_version", ""))
@@ -480,23 +498,23 @@ def find_gap(pkg_name: str) -> dict:
         )
     else:
         # ③ Live Ubuntu version lookup (Launchpad)
-        raw = _launchpad_version(pkg_name) or ""
+        raw = _launchpad_version(pkg_norm) or ""
         result["ubuntu_version"] = _clean_ver(raw)
         if result["source"] == "unknown":
             result["source"] = "live"
         else:
             result["source"] = "known_map+live"
 
-        if pkg_name.startswith("librust-"):
-            crate = _pkg_to_crate(pkg_name)
+        if pkg_norm.startswith("librust-"):
+            crate = _pkg_to_crate(pkg_norm)
             if crate:
                 info = _crates_info(crate)
                 result["upstream_version"] = info.get("latest_version", "")
                 repo = info.get("repository", "")
                 if "github.com" in repo and not result["repo_url"]:
                     result["repo_url"] = re.sub(r"\.git$", "", repo.rstrip("/"))
-        elif pkg_name.startswith("golang-"):
-            module = _golang_pkg_to_module(pkg_name)
+        elif pkg_norm.startswith("golang-"):
+            module = _golang_pkg_to_module(pkg_norm)
             if module:
                 ver, repo_url = _golang_latest_version(module)
                 result["upstream_version"] = ver
@@ -505,7 +523,7 @@ def find_gap(pkg_name: str) -> dict:
 
     # ④ repo_url fallback (crates.io / Go module generic method)
     if not result["repo_url"]:
-        result["repo_url"] = resolve_repo_url(pkg_name)
+        result["repo_url"] = resolve_repo_url(pkg_norm)
 
     # ⑤ If repo_url is known but upstream_version is still empty, fetch from GitHub Tags API
     if result["repo_url"] and not result["upstream_version"]:

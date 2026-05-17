@@ -25,10 +25,12 @@ Usage
 """
 
 import argparse
+import csv
 import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import urllib.parse
 from datetime import date as _date, datetime, timezone
@@ -46,6 +48,7 @@ from tools.diff_harvester import (
     _normalize_repo_url,
 )
 from tools.version_gap_finder import find_gap, KNOWN_UPSTREAM_REPOS
+from tools.version_gap_finder import resolve_source_package_name
 from tools.cve_tracker import lookup_cve_for_commit, check_ubuntu_patch_status, get_ubuntu_component
 from tools.ubuntu_patch_verifier import check_apt_source
 
@@ -64,11 +67,16 @@ log = logging.getLogger("patch_gap_glm")
 _UBUNTU_2404_DETAIL = cfg.DATA_DIR / "output" / "ubuntu_24.04" / "ubuntu_24.04_packages_detail.json"
 _UBUNTU_2604_DETAIL = cfg.DATA_DIR / "output" / "ubuntu_26.04" / "ubuntu_26.04_packages_detail.json"
 _REPORT_FILE        = cfg.FINDINGS_DIR / "patch_gap_report.json"
+_REPORT_CSV_FILE    = cfg.FINDINGS_DIR / "patch_gap_report.csv"
 
 _MAX_COMMITS_STAGE1 = 20   # max commits sent to Stage 1 GLM filter
 _MAX_COMMITS_STAGE2 = 5    # max commits sent to Stage 2 deep audit
 
 _CVE_RE = re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE)
+
+# In-memory caches for API calls that are not persisted across runs
+_MERGE_PR_CACHE:  dict[str, tuple] = {}   # "github/owner/repo/PR#" → (content, url)
+_FORGE_DATE_CACHE: dict[str, Optional[str]] = {}  # "lp_pkg:sha12" → "YYYY-MM-DD"
 
 
 # ── CDSFA-Audit helpers ───────────────────────────────────────────────────────
@@ -215,7 +223,29 @@ def _normalize_ver(raw: str) -> str:
 # Package name variants across Ubuntu versions (e.g., libxml2 → libxml2-16 in 26.04)
 _PACKAGE_VARIANTS: dict[str, list[str]] = {
     "libxml2": ["libxml2", "libxml2-16"],  # 24.04 vs 26.04
+    "libssh": ["libssh", "libssh-4", "libssh-dev"],
+    "pcre2": ["pcre2", "libpcre2-8-0", "libpcre2-dev"],
 }
+
+
+def _package_preference_score(pkg_name: str, base_name: str) -> tuple[int, int, int]:
+    """Lower score is better when choosing a representative binary package."""
+    p = pkg_name.lower()
+    penalties = 0
+    if p.endswith("-dev"):
+        penalties += 3
+    if p.endswith("-doc") or p.endswith("-docs"):
+        penalties += 3
+    if p.endswith("-dbg") or p.endswith("-debug"):
+        penalties += 3
+    if p.endswith("-tools") or p.endswith("-utils") or p.endswith("-common"):
+        penalties += 1
+    if p.endswith("-bin"):
+        penalties += 1
+
+    prefix_bias = 0 if p.startswith(base_name.lower()) else 1
+    return (penalties, prefix_bias, len(pkg_name))
+
 
 def _find_package_in_dicts(base_name: str, pkgs_2404: dict, pkgs_2604: dict) -> tuple[str, str]:
     """
@@ -225,21 +255,45 @@ def _find_package_in_dicts(base_name: str, pkgs_2404: dict, pkgs_2604: dict) -> 
     # First try exact match
     if base_name in pkgs_2404 and base_name in pkgs_2604:
         return (base_name, base_name)
-    
-    # Try variants from mapping
-    variants = _PACKAGE_VARIANTS.get(base_name, [base_name])
-    for variant in variants:
-        if variant in pkgs_2404:
-            ver_2404 = pkgs_2404[variant]
-            # Now find corresponding variant in 26.04
-            for v26 in variants:
-                if v26 in pkgs_2604:
-                    return (variant, v26)
-            # Or if we found 24.04, try looking for any variant in 26.04
-            for v26 in variants:
-                if v26 in pkgs_2604:
-                    return (variant, v26)
-    
+
+    source_name = resolve_source_package_name(base_name)
+
+    # Try explicit variant mapping first (covers known rename patterns)
+    variants = list(dict.fromkeys(
+        _PACKAGE_VARIANTS.get(base_name, []) +
+        _PACKAGE_VARIANTS.get(source_name, []) +
+        [base_name, source_name]
+    ))
+    for v24 in variants:
+        if v24 not in pkgs_2404:
+            continue
+        for v26 in variants:
+            if v26 in pkgs_2604:
+                return (v24, v26)
+
+    # Generic fallback: map source package name to matching binary package names.
+    # Example: pcre2 -> libpcre2-8-0, libpcre2-dev; libssh -> libssh-4, libssh-dev
+    matches_2404 = [
+        name for name in pkgs_2404
+        if resolve_source_package_name(name) == source_name
+    ]
+    matches_2604 = [
+        name for name in pkgs_2604
+        if resolve_source_package_name(name) == source_name
+    ]
+
+    if not matches_2404 or not matches_2604:
+        return ("", "")
+
+    common = set(matches_2404) & set(matches_2604)
+    if common:
+        best = min(common, key=lambda n: _package_preference_score(n, base_name))
+        return (best, best)
+
+    best_2404 = min(matches_2404, key=lambda n: _package_preference_score(n, base_name))
+    best_2604 = min(matches_2604, key=lambda n: _package_preference_score(n, base_name))
+    return (best_2404, best_2604)
+
     # If no variants found, return empty
     return ("", "")
 
@@ -470,6 +524,9 @@ _STAGE2_SYSTEM = (
     "and evaluate the 'logical survival' of vulnerable code — whether it is common "
     "core code unlikely to have changed, and whether the patch is decoupled from "
     "version-specific features. "
+    "Also provide a concrete proof-of-concept reproduction outline: describe the triggering "
+    "input/API call, the vulnerable code path, and the observable crash/behaviour, so a "
+    "researcher can verify exploitability without writing full exploit code. "
     "Respond ONLY with a single valid JSON object. No markdown, no prose."
 )
 
@@ -498,13 +555,22 @@ Answer these questions:
    (i.e., it fixes a generic algorithmic or memory-management issue, not a new API)?
    Rate backport feasibility: Trivial (one-line cherry-pick) / Easy (minimal context changes) /
    Moderate (some refactoring needed) / Hard (deep structural dependency on newer codebase).
+5. Proof-of-concept reproduction outline: describe step by step how a researcher could
+   trigger the vulnerability on Ubuntu 24.04 — the crafted input or API sequence, the
+   vulnerable code path that is exercised, and the expected observable outcome
+   (crash, memory corruption, logic bypass, etc.). Be concrete but concise (3-6 steps).
 
 Respond with this JSON only:
 {{
   "vuln_confirmed_in_2404": true,
   "severity": "CRITICAL|HIGH|MEDIUM|LOW|INFORMATIONAL",
   "vulnerability_type": "one-line description",
-  "poc_sketch": "brief attack scenario",
+  "poc_sketch": "brief one-sentence attack scenario",
+  "poc_reproduction_steps": [
+    "Step 1: ...",
+    "Step 2: ...",
+    "Step 3: ..."
+  ],
   "backport_difficulty": "trivial|easy|moderate|hard|infeasible",
   "backport_notes": "key obstacles or prerequisites for backporting",
   "backport_feasibility": "Trivial|Easy|Moderate|Hard",
@@ -541,13 +607,14 @@ def glm_stage2_audit(
              sha8, len(prompt), cfg.ZAI_MODEL)
 
     clean = {
-        "vuln_confirmed_in_2404": False,
-        "severity":               "INFORMATIONAL",
-        "vulnerability_type":     "None",
-        "poc_sketch":             "",
-        "backport_difficulty":    "unknown",
-        "backport_notes":         "",
-        "cot_rationale":          "",
+        "vuln_confirmed_in_2404":  False,
+        "severity":                "INFORMATIONAL",
+        "vulnerability_type":      "None",
+        "poc_sketch":              "",
+        "poc_reproduction_steps":  [],
+        "backport_difficulty":     "unknown",
+        "backport_notes":          "",
+        "cot_rationale":           "",
     }
     try:
         result = _call_glm(client, _STAGE2_SYSTEM, prompt)
@@ -616,6 +683,17 @@ _LAUNCHPAD_SOURCE: dict[str, str] = {
     "libsystemd-dev":       "systemd",
     "libnss3-dev":          "nss",
     "libnss3":              "nss",
+    "libarchive-dev":       "libarchive",
+    "freerdp3-dev":         "freerdp3",
+    "libopenjp2-7":         "openjpeg2",
+    "libonig5":             "oniguruma",
+    "libpam0g-dev":         "pam",
+    "librados-dev":         "ceph",
+    "libucl1":              "libucl",
+    "libmupdf-dev":         "mupdf",
+    "libevent-dev":         "libevent",
+    "libmysqlclient-dev":   "mysql-8.0",
+    "libicu-dev":           "icu",
 }
 
 _STRIP_PKG_SUFFIXES = re.compile(
@@ -631,7 +709,7 @@ def _launchpad_source_pkg(raw: str) -> str:
     stripped = _STRIP_PKG_SUFFIXES.sub("", raw)
     if stripped in _LAUNCHPAD_SOURCE:
         return _LAUNCHPAD_SOURCE[stripped]
-    return stripped
+    return resolve_source_package_name(raw)
 
 
 # forge_key (= Launchpad source name) → host / path / url_type
@@ -664,7 +742,31 @@ _FORGE_MAP: dict[str, dict] = {
     "gnutls28":      {"host": "gitlab.com",             "path": "gnutls/gnutls",                "url_type": "gitlab"},
     "systemd":       {"host": "github.com",             "path": "systemd/systemd",              "url_type": "github"},
     "nss":           {"host": "github.com",             "path": "nss-dev/nss",                  "url_type": "github"},
+    "libarchive":    {"host": "github.com",             "path": "libarchive/libarchive",         "url_type": "github"},
+    "freerdp3":      {"host": "github.com",             "path": "FreeRDP/FreeRDP",              "url_type": "github"},
+    "imagemagick":   {"host": "github.com",             "path": "ImageMagick/ImageMagick",      "url_type": "github"},
+    "poppler":       {"host": "gitlab.freedesktop.org", "path": "poppler/poppler",              "url_type": "gitlab"},
+    "openjpeg2":     {"host": "github.com",             "path": "uclouvain/openjpeg",           "url_type": "github"},
+    "oniguruma":     {"host": "github.com",             "path": "kkos/oniguruma",               "url_type": "github"},
+    "pam":           {"host": "github.com",             "path": "linux-pam/linux-pam",          "url_type": "github"},
+    "libevent":      {"host": "github.com",             "path": "libevent/libevent",            "url_type": "github"},
+    "icu":           {"host": "github.com",             "path": "unicode-org/icu",              "url_type": "github"},
+    "opensc":        {"host": "github.com",             "path": "OpenSC/OpenSC",                "url_type": "github"},
+    "mupdf":         {"host": "github.com",             "path": "ArtifexSoftware/mupdf",        "url_type": "github"},
+    "ffmpeg":        {"host": "github.com",             "path": "FFmpeg/FFmpeg",                "url_type": "github"},
+    "containerd":    {"host": "github.com",             "path": "containerd/containerd",        "url_type": "github"},
+    "nghttp2":       {"host": "github.com",             "path": "nghttp2/nghttp2",              "url_type": "github"},
+    "libwebp":       {"host": "github.com",             "path": "webmproject/libwebp",          "url_type": "github"},
+    "libpng":        {"host": "github.com",             "path": "pnggroup/libpng",              "url_type": "github"},
+    "mysql-8.0":     {"host": "github.com",             "path": "mysql/mysql-server",           "url_type": "github"},
 }
+
+for _forge_info in _FORGE_MAP.values():
+    _forge_info.setdefault("forge_type", _forge_info.get("url_type", "generic_git"))
+
+for _generic_forge in ("ffmpeg", "imagemagick"):
+    if _generic_forge in _FORGE_MAP:
+        _FORGE_MAP[_generic_forge]["forge_type"] = "generic_git"
 
 
 def _forge_commit_url(pkg: str, sha: str) -> Optional[str]:
@@ -676,6 +778,112 @@ def _forge_commit_url(pkg: str, sha: str) -> Optional[str]:
     if info["url_type"] == "github":
         return f"https://github.com/{path}/commit/{sha}"
     return f"https://{host}/{path}/-/commit/{sha}"
+
+
+def _forge_repo_url(pkg: str) -> Optional[str]:
+    """Resolve upstream repository URL from the internal forge mapping."""
+    lp = _launchpad_source_pkg(pkg)
+    info = _FORGE_MAP.get(lp)
+    if not info or info.get("url_type") is None:
+        return None
+    host, path = info["host"], info["path"]
+    if info["url_type"] == "github":
+        return f"https://github.com/{path}"
+    return f"https://{host}/{path}"
+
+
+def _commit_url_from_source_link(source_url: str, sha: str) -> Optional[str]:
+    """
+    Detect upstream platform from a git clone/browse URL and build a web commit URL.
+    Covers github.com, gitlab.gnome.org, gitlab.freedesktop.org, any gitlab instance.
+    Falls back to the bare source_url for git.kernel.org and other unknown hosts.
+    """
+    if not source_url or not sha:
+        return None
+    # github.com
+    m = re.search(r'github\.com[/:]([^/]+)/([^/\s]+?)(?:\.git)?$', source_url)
+    if m:
+        return f"https://github.com/{m.group(1)}/{m.group(2)}/commit/{sha}"
+    # Any gitlab instance (gitlab.gnome.org, gitlab.freedesktop.org, gitlab.com, …)
+    m = re.search(r'(https?://gitlab\.[^/]+)/([^/]+/[^/\s]+?)(?:\.git)?$', source_url)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}/-/commit/{sha}"
+    # git.kernel.org or other unknown host — return source link as reference
+    if source_url.startswith("http"):
+        return source_url
+    return None
+
+
+def _run_git_ls_remote_tags(repo_url: str) -> list[str]:
+    if not repo_url:
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "--tags", repo_url],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0 or not result.stdout:
+        return []
+    tags: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        ref = parts[1].strip()
+        if ref.endswith("^{}"):
+            ref = ref[:-3]
+        if ref.startswith("refs/tags/"):
+            tags.append(ref.removeprefix("refs/tags/"))
+    return tags
+
+
+def _match_remote_tag(repo_url: str, candidates: list[str], raw_ver: str) -> tuple[Optional[str], Optional[str], bool]:
+    remote_tags = _run_git_ls_remote_tags(repo_url)
+    if not remote_tags:
+        return (None, None, False)
+
+    candidate_set = {
+        c for candidate in candidates
+        for c in (candidate, candidate.lstrip("v"), f"v{candidate.lstrip('v')}")
+        if c
+    }
+
+    for tag in remote_tags:
+        if tag in candidate_set:
+            return (tag, tag, False)
+
+    raw_norm = raw_ver.lstrip("v")
+    best_tag: Optional[str] = None
+    best_score: tuple[int, int] | None = None
+    for tag in remote_tags:
+        tag_norm = tag.lstrip("v")
+        if not tag_norm:
+            continue
+        if raw_norm and raw_norm in tag_norm or tag_norm in raw_norm:
+            score = (abs(len(tag_norm) - len(raw_norm)), 0 if tag_norm.startswith(raw_norm) else 1)
+            if best_score is None or score < best_score:
+                best_tag = tag
+                best_score = score
+    if best_tag:
+        return (best_tag, best_tag, True)
+    return (None, None, False)
+
+
+def _build_browse_tag_url(host: str, path: str, tag: str, *, forge_type: str = "", source_url: str = "") -> str:
+    if forge_type == "github" or host == "github.com":
+        return f"https://github.com/{path}/tree/{tag}"
+    if forge_type == "gitlab" or "gitlab" in host:
+        return f"https://{host}/{path}/-/tree/{tag}"
+    if source_url:
+        return source_url
+    return f"https://{host}/{path}/tree/{tag}"
 
 
 # Known secondary / native git server URLs that NVD may reference instead of
@@ -720,6 +928,182 @@ def _forge_issue_search_url(pkg: str, keyword: str) -> Optional[str]:
     return f"https://{host}/{path}/-/issues/?search={kw}"
 
 
+def _extract_first_filepath_from_diff(diff: str) -> Optional[str]:
+    """
+    Extract the first file path from a git diff.
+    Looks for 'diff --git a/<path> b/<path>' lines.
+    Returns just the path, or None if not found.
+    """
+    m = re.search(r"^diff --git a/(.+) b/\1", diff, re.MULTILINE)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _build_upstream_source_url_for_file(
+    pkg: str,
+    filepath: str,
+    ver_2404: str,
+) -> Optional[str]:
+    """
+    Build an upstream source code browser URL for a specific file at the 24.04 version.
+    
+    Returns a URL like:
+      GitHub: https://github.com/<owner>/<repo>/blob/<upstream_tag>/<filepath>
+      GitLab: https://gitlab.{host}/<owner>/<repo>/-/blob/<upstream_tag>/<filepath>
+    or None if the forge is unknown.
+    """
+    lp = _launchpad_source_pkg(pkg)
+    info = _FORGE_MAP.get(lp)
+    if not info or info.get("url_type") is None:
+        return None
+
+    # Extract upstream version tag from Ubuntu 24.04 version
+    # e.g., "2.9.14+dfsg-1.3ubuntu3" → "v2.9.14" or "2.9.14"
+    raw_ver = ver_2404.strip()
+    raw_ver = re.sub(r"^\d+:", "", raw_ver)        # strip epoch
+    raw_ver = re.sub(r"[+~].*$", "", raw_ver)      # strip +dfsg / ~beta
+    raw_ver = re.sub(r"-.*$", "", raw_ver)          # strip Debian revision
+    raw_ver = raw_ver.lstrip("v")
+
+    # Try candidate tags: v<ver>, <ver>, <pkg>-<ver>
+    candidates = [f"v{raw_ver}", raw_ver]
+    
+    host, path = info["host"], info["path"]
+    url_type = info["url_type"]
+
+    # For now, build URLs for common candidates
+    # In real usage, we'd verify tag existence via API, but here we generate all candidates
+    urls: list[str] = []
+    for tag in candidates:
+        if url_type == "github":
+            url = f"https://github.com/{path}/blob/{tag}/{filepath}"
+        elif url_type == "gitlab":
+            url = f"https://{host}/{path}/-/blob/{tag}/{filepath}"
+        else:
+            continue
+        urls.append(url)
+    
+    # Return the first candidate (usually v<ver>)
+    return urls[0] if urls else None
+
+
+def _changelogs_org_url(
+    pkg: str,
+    component: str,
+    ver_2404_current: Optional[str],
+) -> Optional[str]:
+    """
+    Build the changelogs.ubuntu.com URL for the Ubuntu 24.04 source package changelog.
+
+    URL format:
+      https://changelogs.ubuntu.com/changelogs/pool/{component}/{prefix}/{src_pkg}/{src_pkg}_{ver}/changelog
+
+    prefix: first 4 chars if src_pkg starts with "lib", else first char.
+    Returns None if ver_2404_current is None.
+    """
+    if not ver_2404_current:
+        return None
+    src_pkg = _launchpad_source_pkg(pkg)
+    # Strip common suffixes that may persist after launchpad lookup
+    src_pkg = re.sub(r"(-dev|-doc|-bin)$", "", src_pkg)
+    comp = component if component and component != "unknown" else "universe"
+    prefix = src_pkg[:4] if src_pkg.startswith("lib") else src_pkg[:1]
+    return (
+        f"https://changelogs.ubuntu.com/changelogs/pool/{comp}/{prefix}/"
+        f"{src_pkg}/{src_pkg}_{ver_2404_current}/changelog"
+    )
+
+
+_TAG_URL_CACHE: dict[str, tuple[Optional[str], Optional[str], bool]] = {}  # "{lp}:{raw_ver}" → (url, tag_name, inferred)
+
+
+def _resolve_upstream_tag_url(
+    pkg: str,
+    ver_2404: str,
+    source_url: str = "",
+) -> tuple[Optional[str], Optional[str], bool]:
+    """
+    Attempt to resolve a browse URL for the upstream tag matching Ubuntu 24.04's version.
+
+    Returns (url, tag_name) on success, or (None, None) if no tag is found.
+    Tag candidates tried: [f"v{raw_ver}", raw_ver, f"{src_pkg}-{raw_ver}"]
+    Epoch prefix and Debian revision are stripped from ver_2404 before use.
+    """
+    lp  = _launchpad_source_pkg(pkg)
+    info = _FORGE_MAP.get(lp)
+    if not info or info.get("url_type") is None:
+        return (None, None, False)
+
+    # Strip epoch and Debian revision: "7:6.1.1-3ubuntu5" → "6.1.1"
+    raw_ver = ver_2404.strip()
+    raw_ver = re.sub(r"^\d+:", "", raw_ver)        # strip epoch
+    raw_ver = re.sub(r"[+~].*$", "", raw_ver)      # strip +dfsg / ~beta
+    raw_ver = re.sub(r"-.*$", "", raw_ver)          # strip Debian revision
+    raw_ver = raw_ver.lstrip("v")
+
+    cache_key = f"{lp}:{raw_ver}:{source_url or ''}"
+    if cache_key in _TAG_URL_CACHE:
+        return _TAG_URL_CACHE[cache_key]
+
+    src_pkg = lp
+    candidates = [f"v{raw_ver}", raw_ver, f"{src_pkg}-{raw_ver}"]
+    forge_type = (info.get("forge_type") or info.get("url_type") or "generic_git").lower()
+
+    try:
+        import requests as _req
+    except ImportError:
+        return (None, None, False)
+
+    host     = info["host"]
+    path     = info["path"]
+    token    = os.environ.get("GITHUB_TOKEN", "")
+
+    try:
+        s = _req.Session()
+        s.headers["User-Agent"] = "CDSFA-Audit/1.0 (ubuntu-patch-gap)"
+
+        for tag in candidates:
+            try:
+                if forge_type == "github":
+                    api_url = f"https://api.github.com/repos/{path}/git/refs/tags/{tag}"
+                    if token:
+                        s.headers["Authorization"] = f"token {token}"
+                    r = s.get(api_url, timeout=10)
+                elif forge_type == "gitlab":
+                    proj = urllib.parse.quote(path, safe="")
+                    api_url = f"https://{host}/api/v4/projects/{proj}/repository/tags/{tag}"
+                    gitlab_token = os.environ.get("GITLAB_TOKEN", "")
+                    if gitlab_token:
+                        s.headers["PRIVATE-TOKEN"] = gitlab_token
+                    r = s.get(api_url, timeout=10)
+                elif forge_type in ("cgit", "generic_git"):
+                    r = None
+                else:
+                    continue
+
+                if r is not None and r.status_code == 200:
+                    browse_url = _build_browse_tag_url(host, path, tag, forge_type=forge_type, source_url=source_url)
+                    log.debug("[tag_url] %s → %s", pkg, browse_url)
+                    _TAG_URL_CACHE[cache_key] = (browse_url, tag, False)
+                    return (browse_url, tag, False)
+            except Exception as exc:
+                log.debug("[tag_url] %s tag=%s: %s", pkg, tag, exc)
+    except Exception as exc:
+        log.debug("[tag_url] session error for %s: %s", pkg, exc)
+
+    fallback_url = source_url
+    if fallback_url:
+        remote_tag, _, inferred = _match_remote_tag(fallback_url, candidates, raw_ver)
+        if remote_tag:
+            browse_url = _build_browse_tag_url(host, path, remote_tag, forge_type=forge_type, source_url=source_url)
+            _TAG_URL_CACHE[cache_key] = (browse_url, remote_tag, inferred)
+            return (browse_url, remote_tag, inferred)
+
+    _TAG_URL_CACHE[cache_key] = (None, None, False)
+    return (None, None, False)
+
+
 def _build_verification_urls(
     pkg: str,
     commit_sha: str,
@@ -728,8 +1112,17 @@ def _build_verification_urls(
     ver_2404_current: Optional[str],
     ver_2604: str,
     commit_message: str = "",
+    component: str = "unknown",
+    ver_2404: str = "",
+    source_url: str = "",
+    diff: str = "",
 ) -> dict:
     lp_pkg = _launchpad_source_pkg(pkg)
+
+    # Resolve upstream commit URL: forge map first, then detect from source_url
+    _upstream_commit = _forge_commit_url(pkg, commit_sha)
+    if _upstream_commit is None and source_url:
+        _upstream_commit = _commit_url_from_source_link(source_url, commit_sha)
 
     cve_pages = (
         [
@@ -753,8 +1146,29 @@ def _build_verification_urls(
         "",
     )
 
+    # Issue 4: changelogs.ubuntu.com URL — fall back to recorded ver_2404 when
+    # Launchpad did not return the current version (ver_2404_current is None).
+    changelogs_url = _changelogs_org_url(pkg, component, ver_2404_current or ver_2404)
+
+    # Issue 6: upstream tag browse URL
+    tag_url, tag_name, tag_inferred = _resolve_upstream_tag_url(pkg, ver_2404, source_url=source_url) if ver_2404 else (None, None, False)
+
+    # ── Q1/Q2/Q3 Manual Verification URLs ──────────────────────────────────
+    # Q1: Is this commit really for fixing a vulnerability?
+    q1_url = _upstream_commit  # Same as upstream_commit
+
+    # Q2: Does this vulnerable code exist in Ubuntu 24.04 (upstream version)?
+    q2_url = None
+    if ver_2404:
+        filepath = _extract_first_filepath_from_diff(diff or "")
+        if filepath:
+            q2_url = _build_upstream_source_url_for_file(pkg, filepath, ver_2404)
+
+    # Q3: Did Ubuntu 24.04 really not fix this vulnerability?
+    q3_url = changelogs_url  # Ubuntu changelog URL
+
     return {
-        "upstream_commit":      _forge_commit_url(pkg, commit_sha),
+        "upstream_commit":      _upstream_commit,
         "cve_pages":            cve_pages,
         "usn_pages":            usn_pages,
         "ubuntu_changelog": {
@@ -765,9 +1179,18 @@ def _build_verification_urls(
             ),
             "resolute_current": f"https://launchpad.net/ubuntu/+source/{lp_pkg}/{ver_2604}",
         },
+        "ubuntu_changelog_changelogs_org": changelogs_url,
+        "upstream_2404_tag_url":           tag_url,
+        "_upstream_2404_tag_name":         tag_name,
+        "_upstream_2404_tag_inferred":      tag_inferred,
         "debian_pkg":           f"https://tracker.debian.org/pkg/{lp_pkg}",
         "upstream_issue_search": _forge_issue_search_url(pkg, keyword) if keyword else None,
+        # ── Manual verification URLs (Q1/Q2/Q3) ────────────────────────────
+        "q1_upstream_commit":    q1_url,
+        "q2_upstream_source":    q2_url,
+        "q3_ubuntu_changelog":   q3_url,
     }
+
 
 
 def _build_verification_hints(
@@ -892,6 +1315,32 @@ def _sanity_check(entry: dict) -> list[str]:
             "— high risk of false positive (marker may match an unrelated patch context line). "
             "Manual review required."
         )
+    # CVE_LATE_ASSIGNED: CVE was assigned more than 180 days after upstream commit.
+    days_commit_to_cve = entry.get("days_commit_to_cve")
+    if days_commit_to_cve is not None and days_commit_to_cve > 180:
+        flags.append(
+            f"CVE_LATE_ASSIGNED: CVE assigned {days_commit_to_cve} days after upstream commit"
+        )
+
+    # UPSTREAM_TAG_NOT_FOUND: tag URL resolution attempted (forge known) but failed.
+    v_urls = entry.get("verification_urls") or {}
+    if v_urls.get("upstream_2404_tag_url") is None:
+        lp_check = _launchpad_source_pkg(entry.get("package", ""))
+        if lp_check in _FORGE_MAP:
+            flags.append(
+                "UPSTREAM_TAG_NOT_FOUND: could not verify upstream tag via forge API"
+            )
+
+    # POSSIBLE_BACKPORT_BY_REPORTER: reporter credit found and patch not confirmed.
+    reporter_credits = entry.get("reporter_credits", [])
+    if reporter_credits and entry.get("ubuntu_2404_actually_patched") is not True:
+        for rc in reporter_credits:
+            name = rc.get("name", "")
+            flags.append(
+                f"POSSIBLE_BACKPORT_BY_REPORTER: reporter '{name}' may be credited in "
+                f"24.04 changelog — check for backport"
+            )
+
     # Contamination: >3 CVEs for a single silent fix is almost certainly package-name noise.
     cve_ids = entry.get("cve_ids", [])
     if len(cve_ids) > 3:
@@ -901,6 +1350,34 @@ def _sanity_check(entry: dict) -> list[str]:
             f"contamination. cve_lookup_source={entry.get('_cve_lookup_source', '?')}"
         )
     return flags
+
+
+def _attach_diagnostic_flags(entry: dict) -> dict:
+    """Attach pipeline-level diagnostic flags without duplicating existing prefixes."""
+    flags = list(entry.get("_review_flags") or [])
+
+    def _has_prefix(prefix: str) -> bool:
+        return any(isinstance(f, str) and f.startswith(prefix) for f in flags)
+
+    apt_ver = entry.get("ubuntu_2404_apt_version_at_check")
+    apt_err = entry.get("_apt_fetch_error")
+    if apt_ver is None and not _has_prefix("APT_DATA_MISSING:"):
+        flags.append(f"APT_DATA_MISSING: {apt_err or 'unknown'}")
+
+    deb_status = entry.get("debian_cve_statuses")
+    if (isinstance(deb_status, dict)
+            and deb_status.get("_error")
+            and deb_status.get("_error") in {"timeout", "endpoint_unreachable", "unknown_exception"}
+            and not _has_prefix("DEBIAN_QUERY_FAILED:")):
+        flags.append(f"DEBIAN_QUERY_FAILED: {deb_status.get('_error')}")
+
+    patch_method = str(entry.get("ubuntu_2404_patch_method") or "")
+    inferred_method = patch_method.startswith("unknown_inferred_") or patch_method.endswith("_inferred_absent")
+    if inferred_method and not _has_prefix("PATCH_METHOD_INFERRED:"):
+        flags.append(f"PATCH_METHOD_INFERRED: {patch_method}")
+
+    entry["_review_flags"] = flags
+    return entry
 
 
 def _fetch_commit_author_date_from_forge(pkg: str, sha: str) -> Optional[str]:
@@ -913,6 +1390,12 @@ def _fetch_commit_author_date_from_forge(pkg: str, sha: str) -> Optional[str]:
     info = _FORGE_MAP.get(lp)
     if not info or info.get("url_type") is None:
         return None
+
+    _date_key = f"{lp}:{sha[:12]}"
+    if _date_key in _FORGE_DATE_CACHE:
+        log.debug("[cache] forge_date HIT %s", _date_key)
+        return _FORGE_DATE_CACHE[_date_key]
+
     try:
         import requests as _req
     except ImportError:
@@ -928,9 +1411,12 @@ def _fetch_commit_author_date_from_forge(pkg: str, sha: str) -> Optional[str]:
             r = s.get(url, timeout=15)
             if not r.ok:
                 log.warning("[forge_api] GitHub %s %s: HTTP %s", lp, sha[:12], r.status_code)
+                _FORGE_DATE_CACHE[_date_key] = None
                 return None
             raw = (r.json().get("commit", {}).get("author", {}).get("date") or "")
-            return raw[:10] or None
+            result = raw[:10] or None
+            _FORGE_DATE_CACHE[_date_key] = result
+            return result
         elif info["url_type"] == "gitlab":
             proj  = urllib.parse.quote(info["path"], safe="")
             url   = f"https://{info['host']}/api/v4/projects/{proj}/repository/commits/{sha}"
@@ -940,11 +1426,15 @@ def _fetch_commit_author_date_from_forge(pkg: str, sha: str) -> Optional[str]:
             r = s.get(url, timeout=15)
             if not r.ok:
                 log.warning("[forge_api] GitLab %s %s: HTTP %s", lp, sha[:12], r.status_code)
+                _FORGE_DATE_CACHE[_date_key] = None
                 return None
             raw = (r.json().get("authored_date") or "")
-            return raw[:10] or None
+            result = raw[:10] or None
+            _FORGE_DATE_CACHE[_date_key] = result
+            return result
     except Exception as exc:
         log.debug("[forge_api] %s/%s: %s", pkg, sha[:12], exc)
+        _FORGE_DATE_CACHE[_date_key] = None
         return None
 
 
@@ -969,6 +1459,112 @@ def _get_commit_author_date(repo, pkg: str, sha: str) -> str:
         return ""
 
 
+# Trigger words are case-insensitive; name capture is strict (requires Title Case).
+# Split into two patterns so IGNORECASE applies only to triggers.
+_REPORTER_TRIGGER_RE = re.compile(
+    r'(?:Thanks to|Reported by|Found by|Discovered by|Credit to|Reporter:)\s+',
+    re.IGNORECASE,
+)
+_REPORTER_NAME_RE = re.compile(
+    r'^([A-Z][a-zA-Z\'-]+(?:\s+[A-Z][a-zA-Z\'-]+){0,3})'
+    r'(?:\s+(?:from|of|at)\s+'
+    r'([A-Z][a-zA-Z\s]+?(?:University|Lab|Inc|Ltd|Corp|Institute)))?'
+    r'(?:\s|$|[,.])',
+)
+
+
+def _extract_reporter_credits(text: str) -> list[dict]:
+    """Extract reporter/discoverer credits from commit message or PR body."""
+    results = []
+    seen: set[str] = set()
+    for trigger in _REPORTER_TRIGGER_RE.finditer(text):
+        rest = text[trigger.end():]
+        nm   = _REPORTER_NAME_RE.match(rest)
+        if not nm:
+            continue
+        name        = nm.group(1).strip()
+        affiliation = (nm.group(2) or "").strip() or None
+        if name and name not in seen:
+            seen.add(name)
+            results.append({"name": name, "affiliation": affiliation})
+    return results
+
+
+def _preflight_validate_packages(pkg_names: list[str]) -> None:
+    """Fail fast if any user-specified package cannot be resolved in the Noble pocket."""
+    failures: list[str] = []
+    seen: set[str] = set()
+    for pkg in pkg_names:
+        if not pkg or pkg in seen:
+            continue
+        seen.add(pkg)
+        source_pkg = resolve_source_package_name(pkg)
+        component = get_ubuntu_component(pkg)
+        if component == "unknown":
+            failures.append(f"{pkg} → source={source_pkg} (no Noble pocket entry)")
+    if failures:
+        raise RuntimeError("Noble pocket validation failed for: " + "; ".join(failures))
+
+
+def _resolve_merge_commit_pr(
+    commit_message: str,
+    repo_url: str,
+) -> tuple[Optional[str], Optional[str]]:
+    """
+    If the commit message is a GitHub merge-commit ("Merge pull request #NNN …"),
+    fetch the PR title and body from the GitHub API and return a combined string
+    plus the PR's HTML URL.
+
+    Returns (pr_content, pr_url) on success, or (None, None) on failure.
+    Sets MERGE_COMMIT_UNRESOLVED flag in the caller when None is returned.
+    """
+    m = re.match(r'^Merge pull request #(\d+)', commit_message, re.IGNORECASE)
+    if not m:
+        return (None, None)
+    pr_number = m.group(1)
+
+    # Only handle github.com repos
+    gh_m = re.search(r'github\.com[/:]([^/]+)/([^/.\s]+?)(?:\.git)?$', repo_url)
+    if not gh_m:
+        return (None, None)
+    owner, repo = gh_m.group(1), gh_m.group(2)
+
+    _pr_key = f"github/{owner}/{repo}/{pr_number}"
+    if _pr_key in _MERGE_PR_CACHE:
+        log.debug("[cache] merge_pr HIT %s", _pr_key)
+        return _MERGE_PR_CACHE[_pr_key]
+
+    try:
+        import requests as _req
+    except ImportError:
+        log.debug("[merge_pr] requests not available")
+        return (None, None)
+
+    try:
+        s = _req.Session()
+        s.headers["User-Agent"] = "CDSFA-Audit/1.0 (ubuntu-patch-gap)"
+        token = os.environ.get("GITHUB_TOKEN", "")
+        if token:
+            s.headers["Authorization"] = f"token {token}"
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
+        r = s.get(api_url, timeout=15)
+        if not r.ok:
+            log.warning("[merge_pr] GitHub API %s: HTTP %s", api_url, r.status_code)
+            _MERGE_PR_CACHE[_pr_key] = (None, None)
+            return (None, None)
+        data        = r.json()
+        title       = data.get("title", "")
+        body        = data.get("body", "") or ""
+        pr_html_url = data.get("html_url", "")
+        pr_content  = f"PR #{pr_number}: {title}\n\n{body}"
+        _MERGE_PR_CACHE[_pr_key] = (pr_content, pr_html_url)
+        return (pr_content, pr_html_url)
+    except Exception as exc:
+        log.warning("[merge_pr] failed to fetch PR #%s for %s/%s: %s", pr_number, owner, repo, exc)
+        _MERGE_PR_CACHE[_pr_key] = (None, None)
+        return (None, None)
+
+
 def _make_report_entry(
     pkg: str,
     ver_2404: str,
@@ -983,6 +1579,7 @@ def _make_report_entry(
     patch_status: dict | None = None,
     commit_date: str = "",
     resolute_evidence: str = "",
+    source_url: str = "",
 ) -> dict:
     stage1       = commit.get("stage1", {})
     priority     = stage1.get("canonical_priority", "Unknown")
@@ -1016,7 +1613,7 @@ def _make_report_entry(
     actually_patched   = patch_st.get("ubuntu_2404_actually_patched")
     days_commit_to_now_unfixed = (
         (_date.today() - _date.fromisoformat(commit_date)).days
-        if commit_date and not actually_patched
+        if commit_date and actually_patched is False
         else None
     )
 
@@ -1029,6 +1626,10 @@ def _make_report_entry(
         ver_2404_current = patch_st.get("ubuntu_2404_current_version"),
         ver_2604         = ver_2604,
         commit_message   = commit.get("message", "").splitlines()[0][:200],
+        component        = repo_component,
+        ver_2404         = ver_2404,
+        source_url       = source_url,
+        diff             = commit.get("diff", ""),
     )
     _v_hints = _build_verification_hints(
         commit_sha              = commit.get("sha", ""),
@@ -1040,6 +1641,11 @@ def _make_report_entry(
         actually_patched        = patch_st.get("ubuntu_2404_actually_patched"),
         severity                = stage2.get("severity", "INFORMATIONAL"),
     )
+
+    # ── Issue 7: reporter credits ─────────────────────────────────────────────
+    _commit_msg_full  = commit.get("message", "")
+    _resolved_pr_body = commit.get("_resolved_pr_body", "")
+    reporter_credits  = _extract_reporter_credits(_commit_msg_full + "\n" + _resolved_pr_body)
 
     entry = {
         # ── Core identification ──────────────────────────────────────────────
@@ -1064,11 +1670,13 @@ def _make_report_entry(
         "ubuntu_2404_actually_patched":  actually_patched,
         "ubuntu_2404_patch_method":      patch_st.get("ubuntu_2404_patch_method", "unknown"),
         "ubuntu_2404_current_version":   patch_st.get("ubuntu_2404_current_version"),
+        "_patch_status":                 patch_st.get("_status", "ok"),
         # ── Vulnerability assessment ─────────────────────────────────────────
-        "vuln_confirmed":        stage2.get("vuln_confirmed_in_2404", False),
-        "severity":              stage2.get("severity", "INFORMATIONAL"),
-        "vulnerability_type":    stage2.get("vulnerability_type", ""),
-        "poc_sketch":            stage2.get("poc_sketch", ""),
+        "vuln_confirmed":           stage2.get("vuln_confirmed_in_2404", False),
+        "severity":                 stage2.get("severity", "INFORMATIONAL"),
+        "vulnerability_type":       stage2.get("vulnerability_type", ""),
+        "poc_sketch":               stage2.get("poc_sketch", ""),
+        "poc_reproduction_steps":   stage2.get("poc_reproduction_steps", []),
         # ── Backport analysis ────────────────────────────────────────────────
         "backport_feasibility":  feasibility,
         "backport_difficulty":   stage2.get("backport_difficulty", ""),
@@ -1089,8 +1697,11 @@ def _make_report_entry(
         "ubuntu_2404_apt_version_at_check":  patch_st.get("ubuntu_2404_current_version"),
         "patch_marker_grep_query":           patch_st.get("patch_marker_grep_query"),
         "patch_marker_found":                patch_st.get("patch_marker_found"),
+        "_marker_quality":                   patch_st.get("_marker_quality"),
+        "_apt_fetch_error":                  patch_st.get("_apt_fetch_error"),
         # ── Cross-distro comparison ──────────────────────────────────────────
         "debian_cve_statuses":          cve_data.get("debian_cve_statuses", {}),
+        "_debian_query_attempted":      cve_data.get("_debian_query_attempted", False),
         # ── 26.04 evidence ───────────────────────────────────────────────────
         "ubuntu_2604_evidence":         resolute_evidence,
         # ── Debug / provenance ───────────────────────────────────────────────
@@ -1098,6 +1709,12 @@ def _make_report_entry(
         "_cve_lookup_source":        cve_data.get("_cve_lookup_source", ""),
         "_apt_source_method":        patch_st.get("_apt_source_method", ""),
         "_backend":                  f"zai/{cfg.ZAI_MODEL}",
+        # ── Reporter credits (Issue 7) ────────────────────────────────────────
+        "reporter_credits":          reporter_credits,
+        # ── Resolved PR URL (Issue 8) ─────────────────────────────────────────
+        "_resolved_pr_url":          commit.get("_resolved_pr_url"),
+        # ── API errors encountered during enrichment ──────────────────────────
+        "_errors":                   (cve_data.get("_errors") or []) + (stage2.get("_errors") or []) + (patch_st.get("_errors") or []),
         # ── Verification URLs (browser-navigable, built from existing fields) ──
         "verification_urls":  _v_urls,
         # ── Verification hints (Ctrl+F terms & evidence statements) ───────────
@@ -1105,10 +1722,22 @@ def _make_report_entry(
     }
 
     review_flags = _sanity_check(entry)
+
+    # Propagate MARKER_POST_FIX_ONLY from apt check (Issue 3 / Issue 8)
+    for _apt_flag in patch_st.get("_apt_review_flags", []):
+        if "MARKER_POST_FIX_ONLY" in _apt_flag and "MARKER_POST_FIX_ONLY" not in review_flags:
+            review_flags.append("MARKER_POST_FIX_ONLY")
+            break
+
+    # Propagate MERGE_COMMIT_UNRESOLVED from commit level (Issue 7 / Issue 8)
+    if "MERGE_COMMIT_UNRESOLVED" in commit.get("_review_flags", []) \
+            and "MERGE_COMMIT_UNRESOLVED" not in review_flags:
+        review_flags.append("MERGE_COMMIT_UNRESOLVED")
+
     for flag in review_flags:
         log.warning("[SanityCheck] %s  %s → %s", pkg, commit.get("sha", "")[:12], flag)
     entry["_review_flags"] = review_flags
-    return entry
+    return _attach_diagnostic_flags(entry)
 
 
 def _load_report() -> list:
@@ -1120,10 +1749,119 @@ def _load_report() -> list:
     return []
 
 
-def _save_report(entries: list) -> None:
+def _save_report_csv(entries: list, append: bool = True) -> None:
+    _REPORT_CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "package",
+        "commit_sha",
+        "ubuntu_2404_version",
+        "ubuntu_2604_version",
+        "ubuntu_2404_apt_version_at_check",
+        "_apt_fetch_error",
+        "ubuntu_component",
+        "ubuntu_2404_patch_method",
+        "patch_marker_found",
+        "_marker_quality",
+        "_debian_query_attempted",
+        "debian_cve_statuses",
+        "cve_assigned",
+        "cve_ids",
+        "usn_published",
+        "usn_ids",
+        "ubuntu_2404_actually_patched",
+        "vuln_confirmed",
+        "severity",
+        "poc_sketch",
+        "poc_reproduction_steps",
+        "backport_feasibility",
+        "maintenance_gap_type",
+        "_review_flags",
+    ]
+    # Extra flattened URL columns from entry['verification_urls'] for easy CSV access
+    url_fields = [
+        "upstream_commit",
+        "upstream_2404_tag_url",
+        "ubuntu_changelog_changelogs_org",
+        "ubuntu_changelog_package_overview",
+        "first_cve_page",
+        "first_usn_page",
+        "upstream_issue_search",
+        "q1_upstream_commit",
+        "q2_upstream_source",
+        "q3_ubuntu_changelog",
+    ]
+    fieldnames.extend(url_fields)
+    write_header = not append or not _REPORT_CSV_FILE.exists() or _REPORT_CSV_FILE.stat().st_size == 0
+    mode = "a" if append else "w"
+    with _REPORT_CSV_FILE.open(mode, newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        for entry in entries:
+            row = {}
+            for key in fieldnames:
+                # Primary: direct entry fields
+                if key not in (
+                    "upstream_commit",
+                    "upstream_2404_tag_url",
+                    "ubuntu_changelog_changelogs_org",
+                    "ubuntu_changelog_package_overview",
+                    "first_cve_page",
+                    "first_usn_page",
+                    "upstream_issue_search",
+                    "q1_upstream_commit",
+                    "q2_upstream_source",
+                    "q3_ubuntu_changelog",
+                ):
+                    value = entry.get(key)
+                    if isinstance(value, (dict, list)):
+                        row[key] = json.dumps(value, ensure_ascii=False)
+                    elif value is None:
+                        row[key] = ""
+                    else:
+                        row[key] = value
+                    continue
+
+                # Secondary: flattened URL fields from verification_urls
+                vurls = entry.get("verification_urls") or {}
+                if key == "upstream_commit":
+                    row[key] = vurls.get("upstream_commit") or ""
+                elif key == "upstream_2404_tag_url":
+                    row[key] = vurls.get("upstream_2404_tag_url") or ""
+                elif key == "ubuntu_changelog_changelogs_org":
+                    row[key] = vurls.get("ubuntu_changelog_changelogs_org") or ""
+                elif key == "ubuntu_changelog_package_overview":
+                    ucb = vurls.get("ubuntu_changelog") or {}
+                    row[key] = ucb.get("package_overview") or ""
+                elif key == "first_cve_page":
+                    cves = vurls.get("cve_pages") or []
+                    if isinstance(cves, list) and cves:
+                        first = cves[0]
+                        if isinstance(first, dict):
+                            row[key] = first.get("nvd") or first.get("cve_id") or ""
+                        else:
+                            row[key] = str(first)
+                    else:
+                        row[key] = ""
+                elif key == "first_usn_page":
+                    usns = vurls.get("usn_pages") or []
+                    row[key] = usns[0] if isinstance(usns, list) and usns else ""
+                elif key == "upstream_issue_search":
+                    row[key] = vurls.get("upstream_issue_search") or ""
+                elif key == "q1_upstream_commit":
+                    row[key] = vurls.get("q1_upstream_commit") or ""
+                elif key == "q2_upstream_source":
+                    row[key] = vurls.get("q2_upstream_source") or ""
+                elif key == "q3_ubuntu_changelog":
+                    row[key] = vurls.get("q3_ubuntu_changelog") or ""
+            writer.writerow(row)
+
+
+def _save_report(entries: list, csv_entries: list | None = None) -> None:
     _REPORT_FILE.parent.mkdir(parents=True, exist_ok=True)
     _REPORT_FILE.write_text(json.dumps(entries, indent=2, ensure_ascii=False))
     log.info("[Report] Saved %d entries → %s", len(entries), _REPORT_FILE)
+    _save_report_csv(csv_entries if csv_entries is not None else entries, append=True)
 
 
 def print_summary(entries: list) -> None:
@@ -1190,10 +1928,31 @@ def run_single(pkg_name: str) -> list[dict]:
 
     log.info("[Step1] %s  24.04=%s  26.04=%s", pkg_name, ver_2404, ver_2604)
 
-    repo_url = KNOWN_UPSTREAM_REPOS.get(pkg_name, "")
+    source_pkg = resolve_source_package_name(pkg_name)
+    candidates = []
+    for name in (pkg_name, pkg_2404_name, pkg_2604_name, source_pkg,
+                 resolve_source_package_name(pkg_2404_name),
+                 resolve_source_package_name(pkg_2604_name)):
+        if name and name not in candidates:
+            candidates.append(name)
+
+    repo_url = ""
+    for candidate in candidates:
+        repo_url = KNOWN_UPSTREAM_REPOS.get(candidate, "")
+        if repo_url:
+            break
     if not repo_url:
-        gap = find_gap(pkg_name)
-        repo_url = gap.get("repo_url", "")
+        for candidate in candidates:
+            gap = find_gap(candidate)
+            repo_url = gap.get("repo_url", "")
+            if repo_url:
+                break
+    if not repo_url:
+        for candidate in candidates:
+            repo_url = _forge_repo_url(candidate) or ""
+            if repo_url:
+                log.info("[Step1] Fallback repo from forge map: %s → %s", candidate, repo_url)
+                break
     if not repo_url:
         log.warning("[Step1] No upstream repo URL for %s", pkg_name)
         return []
@@ -1212,6 +1971,26 @@ def run_single(pkg_name: str) -> list[dict]:
         return []
 
     log.info("[Step2] %d candidate commits after regex filter", len(commits))
+
+    # ── Issue 8: Merge commit PR resolution ──────────────────────────────────
+    # Before Stage 1, resolve merge-commit messages to their PR title/body.
+    # This gives the GLM richer context for filtering.
+    for commit in commits:
+        msg = commit.get("message", "")
+        if re.match(r'^Merge pull request #\d+', msg, re.IGNORECASE):
+            pr_content, pr_url = _resolve_merge_commit_pr(msg, repo_url)
+            if pr_content:
+                commit["message"]          = pr_content + "\n\n---\n" + msg
+                commit["_resolved_pr_url"] = pr_url
+                commit["_resolved_pr_body"] = pr_content
+                log.info("[MergePR] resolved PR for SHA=%s → %s",
+                         commit.get("sha", "")[:12], pr_url)
+            else:
+                flags = commit.setdefault("_review_flags", [])
+                if "MERGE_COMMIT_UNRESOLVED" not in flags:
+                    flags.append("MERGE_COMMIT_UNRESOLVED")
+                log.debug("[MergePR] could not resolve PR for SHA=%s",
+                          commit.get("sha", "")[:12])
 
     # ── Step 3: GLM Stage 1 — no-CVE memory/logic vulnerability filter ───────
     log.info("[Step3] GLM Stage 1 filtering %d commits …", len(commits))
@@ -1273,7 +2052,7 @@ def run_single(pkg_name: str) -> list[dict]:
             pkg_name, commit_sha_full,
             commit.get("message", ""),
             affected_funcs,
-            upstream_commit_urls=candidate_urls,
+            candidate_urls,
         )
         log.info("[Step5] SHA=%s  cve_assigned=%s  cve_ids=%s  usn_ids=%s",
                  sha8, cve_data["cve_assigned"], cve_data["cve_ids"], cve_data["usn_ids"])
@@ -1285,25 +2064,39 @@ def run_single(pkg_name: str) -> list[dict]:
         )
         # Also run apt-source check (Docker or Launchpad fallback)
         apt_check = check_apt_source(pkg_name, commit_sha_full, ver_2404, commit.get("diff", ""))
-        # Merge apt-source result with tracker result:
-        # • apt_check True  → always overrides (source-level confirmation wins)
-        # • apt_check False → only overrides when CVE tracker hasn't already confirmed True;
-        #   a strict marker threshold may miss a confirmed patch, so we don't let a
-        #   False clobber an authoritative "released" verdict from the Ubuntu CVE tracker.
-        # • Provenance fields are always propagated regardless of verdict.
-        apt_patched      = apt_check.get("ubuntu_2404_actually_patched")
-        existing_patched = patch_status_data.get("ubuntu_2404_actually_patched")
-        if apt_patched is True or (apt_patched is False and existing_patched is not True):
+        if apt_check.get("_status") == "skipped_due_to_apt_failure":
             patch_status_data.update({
-                k: v for k, v in apt_check.items()
-                if k in ("ubuntu_2404_actually_patched",
-                         "ubuntu_2404_patch_method",
-                         "ubuntu_2404_current_version",
-                         "_apt_source_method")
+                "ubuntu_2404_actually_patched": None,
+                "ubuntu_2404_patch_method": None,
+                "ubuntu_2404_current_version": None,
+                "_apt_source_method": apt_check.get("_apt_source_method", ""),
+                "_apt_fetch_error": apt_check.get("_apt_fetch_error"),
+                "_status": "skipped_due_to_apt_failure",
             })
-        for prov_key in ("patch_marker_grep_query", "patch_marker_found"):
-            if prov_key in apt_check:
-                patch_status_data[prov_key] = apt_check[prov_key]
+        else:
+            # Merge apt-source result with tracker result:
+            # • apt_check True  → always overrides (source-level confirmation wins)
+            # • apt_check False → only overrides when CVE tracker hasn't already confirmed True;
+            #   a strict marker threshold may miss a confirmed patch, so we don't let a
+            #   False clobber an authoritative "released" verdict from the Ubuntu CVE tracker.
+            # • Provenance fields are always propagated regardless of verdict.
+            apt_patched      = apt_check.get("ubuntu_2404_actually_patched")
+            existing_patched = patch_status_data.get("ubuntu_2404_actually_patched")
+            if apt_patched is True or (apt_patched is False and existing_patched is not True):
+                patch_status_data.update({
+                    k: v for k, v in apt_check.items()
+                    if k in ("ubuntu_2404_actually_patched",
+                             "ubuntu_2404_patch_method",
+                             "ubuntu_2404_current_version",
+                             "_apt_source_method")
+                })
+            for prov_key in ("patch_marker_grep_query", "patch_marker_found", "_marker_quality", "_apt_fetch_error"):
+                if prov_key in apt_check:
+                    patch_status_data[prov_key] = apt_check[prov_key]
+            # Propagate any MARKER_POST_FIX_ONLY flags from the apt_source check.
+            for flag in apt_check.get("_review_flags", []):
+                patch_status_data.setdefault("_apt_review_flags", []).append(flag)
+
         log.info("[Step6] SHA=%s  actually_patched=%s  method=%s",
                  sha8,
                  patch_status_data.get("ubuntu_2404_actually_patched"),
@@ -1318,6 +2111,7 @@ def run_single(pkg_name: str) -> list[dict]:
             patch_status=patch_status_data,
             commit_date=commit_date,
             resolute_evidence=resolute_evidence,
+            source_url=repo_url,
         )
         entries.append(entry)
 
@@ -1355,6 +2149,7 @@ def run_single(pkg_name: str) -> list[dict]:
 
 def run_package_list(pkg_names: list[str]) -> None:
     """Run pipeline for each package, saving incrementally."""
+    _preflight_validate_packages(pkg_names)
     all_entries = _load_report()
     done_keys   = {(e["package"], e["commit_sha"]) for e in all_entries}
 
@@ -1366,16 +2161,16 @@ def run_package_list(pkg_names: list[str]) -> None:
             log.error("[Main] %s pipeline error: %s", pkg, exc, exc_info=True)
             continue
 
-        added = 0
+        added_entries: list[dict] = []
         for e in new_entries:
             key = (e["package"], e["commit_sha"])
             if key not in done_keys:
                 all_entries.append(e)
                 done_keys.add(key)
-                added += 1
+            added_entries.append(e)
 
-        _save_report(all_entries)
-        log.info("[Main] %s: %d new entries added", pkg, added)
+        _save_report(all_entries, csv_entries=added_entries)
+        log.info("[Main] %s: %d new entries added", pkg, len(added_entries))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1398,12 +2193,17 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.package:
-        entries  = run_single(args.package)
-        existing = _load_report()
-        done_keys = {(e["package"], e["commit_sha"]) for e in existing}
-        new = [e for e in entries if (e["package"], e["commit_sha"]) not in done_keys]
-        _save_report(existing + new)
-        print_summary(new or entries)
+        try:
+            _preflight_validate_packages([args.package])
+            entries  = run_single(args.package)
+            existing = _load_report()
+            done_keys = {(e["package"], e["commit_sha"]) for e in existing}
+            new = [e for e in entries if (e["package"], e["commit_sha"]) not in done_keys]
+            _save_report(existing + new, csv_entries=new)
+            print_summary(new or entries)
+        except RuntimeError as exc:
+            log.error("[Main] %s", exc)
+            sys.exit(1)
 
     elif args.file:
         fpath = Path(args.file)
@@ -1413,15 +2213,23 @@ def main() -> None:
         pkgs = [ln.strip() for ln in fpath.read_text().splitlines()
                 if ln.strip() and not ln.startswith("#")]
         log.info("[Main] Loaded %d packages from %s", len(pkgs), fpath)
-        run_package_list(pkgs)
-        print_summary(_load_report())
+        try:
+            run_package_list(pkgs)
+            print_summary(_load_report())
+        except RuntimeError as exc:
+            log.error("[Main] %s", exc)
+            sys.exit(1)
 
     else:  # --auto
         gaps = find_version_gaps()
         if args.top:
             gaps = gaps[:args.top]
-        run_package_list([g["package"] for g in gaps])
-        print_summary(_load_report())
+        try:
+            run_package_list([g["package"] for g in gaps])
+            print_summary(_load_report())
+        except RuntimeError as exc:
+            log.error("[Main] %s", exc)
+            sys.exit(1)
 
 
 if __name__ == "__main__":
