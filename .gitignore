@@ -4,3 +4,9 @@
 .DS_Store
 .AppleDouble
 .LSOverride
+config.md
+models/
+workspace/
+__pycache__/
+.venv/
+data/findings/cot_logs/
